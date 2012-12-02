@@ -53,7 +53,7 @@ public:
 
     DrmInfo* acquireDrmInfo(int uniqueId, const DrmInfoRequest* drmInfoRequest);
 
-    String8 getOriginalMimeType(int uniqueId, const String8& path);
+    String8 getOriginalMimeType(int uniqueId, const String8& path, int fd);
 
     int getDrmObjectType(int uniqueId, const String8& path, const String8& mimeType);
 
@@ -86,6 +86,9 @@ public:
     status_t openDecryptSession(
             int uniqueId, DecryptHandle* decryptHandle,
             const char* uri, const char* mime);
+
+    status_t openDecryptSession(int uniqueId, DecryptHandle* decryptHandle,
+            const DrmBuffer& buf, const String8& mimeType);
 
     status_t closeDecryptSession(int uniqueId, DecryptHandle* decryptHandle);
 
@@ -219,10 +222,11 @@ protected:
      *
      * @param[in] uniqueId Unique identifier for a session
      * @param[in] path Path of the protected content
+     * @param[in] fd descriptor of the protected content as a file source
      * @return String8
      *     Returns mime-type of the original content, such as "video/mpeg"
      */
-    virtual String8 onGetOriginalMimeType(int uniqueId, const String8& path) = 0;
+    virtual String8 onGetOriginalMimeType(int uniqueId, const String8& path, int fd) = 0;
 
     /**
      * Retrieves the type of the protected object (content, rights, etc..)
@@ -429,6 +433,21 @@ protected:
             int uniqueId, DecryptHandle* decryptHandle,
             const char* uri, const char* mime) {
 
+        return DRM_ERROR_CANNOT_HANDLE;
+    }
+
+    /**
+     * Open the decrypt session to decrypt the given protected content
+     *
+     * @param[in] uniqueId Unique identifier for a session
+     * @param[in] decryptHandle Handle for the current decryption session
+     * @param[in] buf Data to initiate decrypt session
+     * @param[in] mimeType Mime type of the protected content
+     * @return
+     *     DRM_ERROR_CANNOT_HANDLE for failure and DRM_NO_ERROR for success
+     */
+    virtual status_t onOpenDecryptSession(int uniqueId, DecryptHandle* decryptHandle,
+            const DrmBuffer& buf, const String8& mimeType) {
         return DRM_ERROR_CANNOT_HANDLE;
     }
 

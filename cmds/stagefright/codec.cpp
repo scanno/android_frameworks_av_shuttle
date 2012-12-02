@@ -34,7 +34,9 @@
 #include <media/stagefright/MediaCodecList.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/NuMediaExtractor.h>
+#include <gui/ISurfaceComposer.h>
 #include <gui/SurfaceComposerClient.h>
+#include <ui/DisplayInfo.h>
 
 static void usage(const char *me) {
     fprintf(stderr, "usage: %s [-a] use audio\n"
@@ -378,14 +380,17 @@ int main(int argc, char **argv) {
         composerClient = new SurfaceComposerClient;
         CHECK_EQ(composerClient->initCheck(), (status_t)OK);
 
-        ssize_t displayWidth = composerClient->getDisplayWidth(0);
-        ssize_t displayHeight = composerClient->getDisplayHeight(0);
+        sp<IBinder> display(SurfaceComposerClient::getBuiltInDisplay(
+                ISurfaceComposer::eDisplayIdMain));
+        DisplayInfo info;
+        SurfaceComposerClient::getDisplayInfo(display, &info);
+        ssize_t displayWidth = info.w;
+        ssize_t displayHeight = info.h;
 
         ALOGV("display is %ld x %ld\n", displayWidth, displayHeight);
 
         control = composerClient->createSurface(
                 String8("A Surface"),
-                0,
                 displayWidth,
                 displayHeight,
                 PIXEL_FORMAT_RGB_565,

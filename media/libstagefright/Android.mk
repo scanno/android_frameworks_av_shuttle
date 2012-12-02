@@ -19,6 +19,7 @@ LOCAL_SRC_FILES:=                         \
         ESDS.cpp                          \
         FileSource.cpp                    \
         FLACExtractor.cpp                 \
+        FragmentedMP4Extractor.cpp        \
         HTTPBase.cpp                      \
         JPEGSource.cpp                    \
         MP3Extractor.cpp                  \
@@ -53,12 +54,13 @@ LOCAL_SRC_FILES:=                         \
         WVMExtractor.cpp                  \
         XINGSeeker.cpp                    \
         avc_utils.cpp                     \
+        mp4/FragmentedMP4Parser.cpp       \
+        mp4/TrackFragment.cpp             \
 
 LOCAL_C_INCLUDES:= \
         $(TOP)/frameworks/av/include/media/stagefright/timedtext \
         $(TOP)/frameworks/native/include/media/hardware \
         $(TOP)/frameworks/native/include/media/openmax \
-        $(TOP)/external/expat/lib \
         $(TOP)/external/flac/include \
         $(TOP)/external/tremolo \
         $(TOP)/external/openssl/include \
@@ -81,6 +83,7 @@ LOCAL_SHARED_LIBRARIES := \
         libssl \
         libstagefright_omx \
         libstagefright_yuv \
+        libsync \
         libui \
         libutils \
         libvorbisidec \
@@ -97,13 +100,9 @@ LOCAL_STATIC_LIBRARIES := \
         libstagefright_id3 \
         libFLAC \
 
-ifneq ($(TARGET_BUILD_PDK), true)
-LOCAL_STATIC_LIBRARIES += \
-	libstagefright_chromium_http
-LOCAL_SHARED_LIBRARIES += \
-        libchromium_net
+LOCAL_SRC_FILES += \
+        chromium_http_stub.cpp
 LOCAL_CPPFLAGS += -DCHROMIUM_AVAILABLE=1
-endif
 
 LOCAL_SHARED_LIBRARIES += libstlport
 include external/stlport/libstlport.mk
@@ -117,6 +116,8 @@ LOCAL_SHARED_LIBRARIES += \
 LOCAL_CFLAGS += -Wno-multichar
 
 LOCAL_MODULE:= libstagefright
+
+LOCAL_MODULE_TAGS := optional
 
 include $(BUILD_SHARED_LIBRARY)
 

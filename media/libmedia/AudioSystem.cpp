@@ -41,7 +41,7 @@ DefaultKeyedVector<audio_io_handle_t, AudioSystem::OutputDescriptor *> AudioSyst
 // Cached values for recording queries, all protected by gLock
 uint32_t AudioSystem::gPrevInSamplingRate = 16000;
 audio_format_t AudioSystem::gPrevInFormat = AUDIO_FORMAT_PCM_16_BIT;
-int AudioSystem::gPrevInChannelCount = 1;
+audio_channel_mask_t AudioSystem::gPrevInChannelMask = AUDIO_CHANNEL_IN_MONO;
 size_t AudioSystem::gInBuffSize = 0;
 
 
@@ -334,25 +334,25 @@ status_t AudioSystem::getLatency(audio_io_handle_t output,
     return NO_ERROR;
 }
 
-status_t AudioSystem::getInputBufferSize(uint32_t sampleRate, audio_format_t format, int channelCount,
-    size_t* buffSize)
+status_t AudioSystem::getInputBufferSize(uint32_t sampleRate, audio_format_t format,
+        audio_channel_mask_t channelMask, size_t* buffSize)
 {
     gLock.lock();
     // Do we have a stale gInBufferSize or are we requesting the input buffer size for new values
     size_t inBuffSize = gInBuffSize;
     if ((inBuffSize == 0) || (sampleRate != gPrevInSamplingRate) || (format != gPrevInFormat)
-        || (channelCount != gPrevInChannelCount)) {
+        || (channelMask != gPrevInChannelMask)) {
         gLock.unlock();
         const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
         if (af == 0) {
             return PERMISSION_DENIED;
         }
-        inBuffSize = af->getInputBufferSize(sampleRate, format, channelCount);
+        inBuffSize = af->getInputBufferSize(sampleRate, format, channelMask);
         gLock.lock();
         // save the request params
         gPrevInSamplingRate = sampleRate;
         gPrevInFormat = format;
-        gPrevInChannelCount = channelCount;
+        gPrevInChannelMask = channelMask;
 
         gInBuffSize = inBuffSize;
     }
@@ -449,7 +449,7 @@ void AudioSystem::AudioFlingerClient::ioConfigChanged(int event, audio_io_handle
 
         OutputDescriptor *outputDesc =  new OutputDescriptor(*desc);
         gOutputs.add(ioHandle, outputDesc);
-        ALOGV("ioConfigChanged() new output samplingRate %d, format %d channels %d frameCount %d latency %d",
+        ALOGV("ioConfigChanged() new output samplingRate %d, format %d channels %#x frameCount %d latency %d",
                 outputDesc->samplingRate, outputDesc->format, outputDesc->channels, outputDesc->frameCount, outputDesc->latency);
         } break;
     case OUTPUT_CLOSED: {
@@ -471,7 +471,7 @@ void AudioSystem::AudioFlingerClient::ioConfigChanged(int event, audio_io_handle
         if (param2 == NULL) break;
         desc = (const OutputDescriptor *)param2;
 
-        ALOGV("ioConfigChanged() new config for output %d samplingRate %d, format %d channels %d frameCount %d latency %d",
+        ALOGV("ioConfigChanged() new config for output %d samplingRate %d, format %d channels %#x frameCount %d latency %d",
                 ioHandle, desc->samplingRate, desc->format,
                 desc->channels, desc->frameCount, desc->latency);
         OutputDescriptor *outputDesc = gOutputs.valueAt(index);
@@ -588,12 +588,12 @@ audio_policy_forced_cfg_t AudioSystem::getForceUse(audio_policy_force_use_t usag
 audio_io_handle_t AudioSystem::getOutput(audio_stream_type_t stream,
                                     uint32_t samplingRate,
                                     audio_format_t format,
-                                    uint32_t channels,
+                                    audio_channel_mask_t channelMask,
                                     audio_output_flags_t flags)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
     if (aps == 0) return 0;
-    return aps->getOutput(stream, samplingRate, format, channels, flags);
+    return aps->getOutput(stream, samplingRate, format, channelMask, flags);
 }
 
 // ## Compatibility fn to be able to use ICS propietary libs with JB - As soon as JB
@@ -604,9 +604,9 @@ audio_io_handle_t AudioSystem::getOutput(audio_stream_type_t stream,
 										uint32_t channels, 
 										audio_policy_output_flags_t flags)
 {
-	return getOutput(stream,samplingRate,(audio_format_t)format,channels,(audio_output_flags_t)flags);
+	return getOutput(stream,samplingRate,(audio_format_t)format,(audio_channel_mask_t)channels,(audio_output_flags_t)flags);
 }									
-// ##
+// ## 
 
 status_t AudioSystem::startOutput(audio_io_handle_t output,
                                   audio_stream_type_t stream,
@@ -636,13 +636,12 @@ void AudioSystem::releaseOutput(audio_io_handle_t output)
 audio_io_handle_t AudioSystem::getInput(audio_source_t inputSource,
                                     uint32_t samplingRate,
                                     audio_format_t format,
-                                    uint32_t channels,
-                                    audio_in_acoustics_t acoustics,
+                                    audio_channel_mask_t channelMask,
                                     int sessionId)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
     if (aps == 0) return 0;
-    return aps->getInput(inputSource, samplingRate, format, channels, acoustics, sessionId);
+    return aps->getInput(inputSource, samplingRate, format, channelMask, sessionId);
 }
 
 status_t AudioSystem::startInput(audio_io_handle_t input)
@@ -707,14 +706,14 @@ audio_devices_t AudioSystem::getDevicesForStream(audio_stream_type_t stream)
     return aps->getDevicesForStream(stream);
 }
 
-audio_io_handle_t AudioSystem::getOutputForEffect(effect_descriptor_t *desc)
+audio_io_handle_t AudioSystem::getOutputForEffect(const effect_descriptor_t *desc)
 {
     const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
     if (aps == 0) return PERMISSION_DENIED;
     return aps->getOutputForEffect(desc);
 }
 
-status_t AudioSystem::registerEffect(effect_descriptor_t *desc,
+status_t AudioSystem::registerEffect(const effect_descriptor_t *desc,
                                 audio_io_handle_t io,
                                 uint32_t strategy,
                                 int session,
@@ -748,6 +747,28 @@ status_t AudioSystem::isStreamActive(audio_stream_type_t stream, bool* state, ui
     return NO_ERROR;
 }
 
+status_t AudioSystem::isSourceActive(audio_source_t stream, bool* state)
+{
+    const sp<IAudioPolicyService>& aps = AudioSystem::get_audio_policy_service();
+    if (aps == 0) return PERMISSION_DENIED;
+    if (state == NULL) return BAD_VALUE;
+    *state = aps->isSourceActive(stream);
+    return NO_ERROR;
+}
+
+int32_t AudioSystem::getPrimaryOutputSamplingRate()
+{
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) return 0;
+    return af->getPrimaryOutputSamplingRate();
+}
+
+int32_t AudioSystem::getPrimaryOutputFrameCount()
+{
+    const sp<IAudioFlinger>& af = AudioSystem::get_audio_flinger();
+    if (af == 0) return 0;
+    return af->getPrimaryOutputFrameCount();
+}
 
 void AudioSystem::clearAudioConfigCache()
 {

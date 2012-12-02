@@ -43,7 +43,8 @@ TimedTextDriver::TimedTextDriver(
         const wp<MediaPlayerBase> &listener)
     : mLooper(new ALooper),
       mListener(listener),
-      mState(UNINITIALIZED) {
+      mState(UNINITIALIZED),
+      mCurrentTrackIndex(UINT_MAX) {
     mLooper->setName("TimedTextDriver");
     mLooper->start();
     mPlayer = new TimedTextPlayer(listener);
@@ -57,11 +58,14 @@ TimedTextDriver::~TimedTextDriver() {
 }
 
 status_t TimedTextDriver::selectTrack_l(size_t index) {
+    if (mCurrentTrackIndex == index) {
+        return OK;
+    }
     sp<TimedTextSource> source;
     source = mTextSourceVector.valueFor(index);
     mPlayer->setDataSource(source);
     if (mState == UNINITIALIZED) {
-        mState = PAUSED;
+        mState = PREPARED;
     }
     mCurrentTrackIndex = index;
     return OK;
@@ -74,42 +78,47 @@ status_t TimedTextDriver::start() {
             return INVALID_OPERATION;
         case PLAYING:
             return OK;
-        case PAUSED:
+        case PREPARED:
             mPlayer->start();
-            break;
+            mState = PLAYING;
+            return OK;
+        case PAUSED:
+            mPlayer->resume();
+            mState = PLAYING;
+            return OK;
         default:
             TRESPASS();
     }
-    mState = PLAYING;
-    return OK;
+    return UNKNOWN_ERROR;
 }
 
-// TODO: Test if pause() works properly.
-// Scenario 1: start - pause - resume
-// Scenario 2: start - seek
-// Scenario 3: start - pause - seek - resume
 status_t TimedTextDriver::pause() {
     Mutex::Autolock autoLock(mLock);
+    ALOGV("%s() is called", __FUNCTION__);
     switch (mState) {
         case UNINITIALIZED:
             return INVALID_OPERATION;
         case PLAYING:
             mPlayer->pause();
-            break;
+            mState = PAUSED;
+            return OK;
+        case PREPARED:
+            return INVALID_OPERATION;
         case PAUSED:
             return OK;
         default:
             TRESPASS();
     }
-    mState = PAUSED;
-    return OK;
+    return UNKNOWN_ERROR;
 }
 
 status_t TimedTextDriver::selectTrack(size_t index) {
     status_t ret = OK;
     Mutex::Autolock autoLock(mLock);
+    ALOGV("%s() is called", __FUNCTION__);
     switch (mState) {
         case UNINITIALIZED:
+        case PREPARED:
         case PAUSED:
             ret = selectTrack_l(index);
             break;
@@ -128,21 +137,51 @@ status_t TimedTextDriver::selectTrack(size_t index) {
 }
 
 status_t TimedTextDriver::unselectTrack(size_t index) {
+    Mutex::Autolock autoLock(mLock);
+    ALOGV("%s() is called", __FUNCTION__);
     if (mCurrentTrackIndex != index) {
         return INVALID_OPERATION;
     }
-    status_t err = pause();
-    if (err != OK) {
-        return err;
+    mCurrentTrackIndex = UINT_MAX;
+    switch (mState) {
+        case UNINITIALIZED:
+            return INVALID_OPERATION;
+        case PLAYING:
+            mPlayer->setDataSource(NULL);
+            mState = UNINITIALIZED;
+            return OK;
+        case PREPARED:
+        case PAUSED:
+            mState = UNINITIALIZED;
+            return OK;
+        default:
+            TRESPASS();
     }
-    Mutex::Autolock autoLock(mLock);
-    mState = UNINITIALIZED;
-    return OK;
+    return UNKNOWN_ERROR;
 }
 
 status_t TimedTextDriver::seekToAsync(int64_t timeUs) {
-    mPlayer->seekToAsync(timeUs);
-    return OK;
+    Mutex::Autolock autoLock(mLock);
+    ALOGV("%s() is called", __FUNCTION__);
+    switch (mState) {
+        case UNINITIALIZED:
+            return INVALID_OPERATION;
+        case PREPARED:
+            mPlayer->seekToAsync(timeUs);
+            mPlayer->pause();
+            mState = PAUSED;
+            return OK;
+        case PAUSED:
+            mPlayer->seekToAsync(timeUs);
+            mPlayer->pause();
+            return OK;
+        case PLAYING:
+            mPlayer->seekToAsync(timeUs);
+            return OK;
+        defaut:
+            TRESPASS();
+    }
+    return UNKNOWN_ERROR;
 }
 
 status_t TimedTextDriver::addInBandTextSource(

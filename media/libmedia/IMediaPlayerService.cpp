@@ -21,12 +21,16 @@
 #include <binder/Parcel.h>
 #include <binder/IMemory.h>
 #include <media/ICrypto.h>
+#include <media/IHDCP.h>
 #include <media/IMediaPlayerService.h>
 #include <media/IMediaRecorder.h>
 #include <media/IOMX.h>
+#include <media/IRemoteDisplay.h>
+#include <media/IRemoteDisplayClient.h>
 #include <media/IStreamSource.h>
 
 #include <utils/Errors.h>  // for status_t
+#include <utils/String8.h>
 
 namespace android {
 
@@ -38,8 +42,10 @@ enum {
     CREATE_METADATA_RETRIEVER,
     GET_OMX,
     MAKE_CRYPTO,
+    MAKE_HDCP,
     ADD_BATTERY_DATA,
-    PULL_BATTERY_DATA
+    PULL_BATTERY_DATA,
+    LISTEN_FOR_REMOTE_DISPLAY,
 };
 
 class BpMediaPlayerService: public BpInterface<IMediaPlayerService>
@@ -120,6 +126,13 @@ public:
         return interface_cast<ICrypto>(reply.readStrongBinder());
     }
 
+    virtual sp<IHDCP> makeHDCP() {
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaPlayerService::getInterfaceDescriptor());
+        remote()->transact(MAKE_HDCP, data, &reply);
+        return interface_cast<IHDCP>(reply.readStrongBinder());
+    }
+
     virtual void addBatteryData(uint32_t params) {
         Parcel data, reply;
         data.writeInterfaceToken(IMediaPlayerService::getInterfaceDescriptor());
@@ -131,6 +144,17 @@ public:
         Parcel data;
         data.writeInterfaceToken(IMediaPlayerService::getInterfaceDescriptor());
         return remote()->transact(PULL_BATTERY_DATA, data, reply);
+    }
+
+    virtual sp<IRemoteDisplay> listenForRemoteDisplay(const sp<IRemoteDisplayClient>& client,
+            const String8& iface)
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaPlayerService::getInterfaceDescriptor());
+        data.writeStrongBinder(client->asBinder());
+        data.writeString8(iface);
+        remote()->transact(LISTEN_FOR_REMOTE_DISPLAY, data, &reply);
+        return interface_cast<IRemoteDisplay>(reply.readStrongBinder());
     }
 };
 
@@ -206,6 +230,12 @@ status_t BnMediaPlayerService::onTransact(
             reply->writeStrongBinder(crypto->asBinder());
             return NO_ERROR;
         } break;
+        case MAKE_HDCP: {
+            CHECK_INTERFACE(IMediaPlayerService, data, reply);
+            sp<IHDCP> hdcp = makeHDCP();
+            reply->writeStrongBinder(hdcp->asBinder());
+            return NO_ERROR;
+        } break;
         case ADD_BATTERY_DATA: {
             CHECK_INTERFACE(IMediaPlayerService, data, reply);
             uint32_t params = data.readInt32();
@@ -215,6 +245,15 @@ status_t BnMediaPlayerService::onTransact(
         case PULL_BATTERY_DATA: {
             CHECK_INTERFACE(IMediaPlayerService, data, reply);
             pullBatteryData(reply);
+            return NO_ERROR;
+        } break;
+        case LISTEN_FOR_REMOTE_DISPLAY: {
+            CHECK_INTERFACE(IMediaPlayerService, data, reply);
+            sp<IRemoteDisplayClient> client(
+                    interface_cast<IRemoteDisplayClient>(data.readStrongBinder()));
+            String8 iface(data.readString8());
+            sp<IRemoteDisplay> display(listenForRemoteDisplay(client, iface));
+            reply->writeStrongBinder(display->asBinder());
             return NO_ERROR;
         } break;
         default:

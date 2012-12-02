@@ -17,21 +17,14 @@
 #ifndef AUDIORECORD_H_
 #define AUDIORECORD_H_
 
-#include <stdint.h>
-#include <sys/types.h>
-
-#include <media/IAudioFlinger.h>
-#include <media/IAudioRecord.h>
-
-#include <utils/RefBase.h>
-#include <utils/Errors.h>
-#include <binder/IInterface.h>
 #include <binder/IMemory.h>
 #include <cutils/sched_policy.h>
-#include <utils/threads.h>
-
-#include <system/audio.h>
 #include <media/AudioSystem.h>
+#include <media/IAudioRecord.h>
+#include <system/audio.h>
+#include <utils/RefBase.h>
+#include <utils/Errors.h>
+#include <utils/threads.h>
 
 namespace android {
 
@@ -46,11 +39,10 @@ public:
     static const int DEFAULT_SAMPLE_RATE = 8000;
 
     /* Events used by AudioRecord callback function (callback_t).
-     *
-     * to keep in sync with frameworks/base/media/java/android/media/AudioRecord.java
+     * Keep in sync with frameworks/base/media/java/android/media/AudioRecord.java NATIVE_EVENT_*.
      */
     enum event_type {
-        EVENT_MORE_DATA = 0,        // Request to reqd more data from PCM buffer.
+        EVENT_MORE_DATA = 0,        // Request to read more data from PCM buffer.
         EVENT_OVERRUN = 1,          // PCM buffer overrun occured.
         EVENT_MARKER = 2,           // Record head is at the specified marker position
                                     // (See setMarkerPosition()).
@@ -72,19 +64,13 @@ public:
         int         channelCount;
         audio_format_t format;
         size_t      frameCount;
-        size_t      size;
+        size_t      size;           // total size in bytes == frameCount * frameSize
         union {
             void*       raw;
             short*      i16;
             int8_t*     i8;
         };
     };
-
-    /* These are static methods to control the system-wide AudioFlinger
-     * only privileged processes can have access to them
-     */
-
-//    static status_t setMasterMute(bool mute);
 
     /* As a convenience, if a callback is supplied, a handler thread
      * is automatically created with the appropriate priority. This thread
@@ -98,8 +84,8 @@ public:
      *          more bytes than indicated by 'size' field and update 'size' if less bytes are
      *          read.
      *          - EVENT_OVERRUN: unused.
-     *          - EVENT_MARKER: pointer to an uin32_t containing the marker position in frames.
-     *          - EVENT_NEW_POS: pointer to an uin32_t containing the new position in frames.
+     *          - EVENT_MARKER: pointer to const uint32_t containing the marker position in frames.
+     *          - EVENT_NEW_POS: pointer to const uint32_t containing the new position in frames.
      */
 
     typedef void (*callback_t)(int event, void* user, void *info);
@@ -115,7 +101,7 @@ public:
      static status_t getMinFrameCount(int* frameCount,
                                       uint32_t sampleRate,
                                       audio_format_t format,
-                                      int channelCount);
+                                      audio_channel_mask_t channelMask);
 
     /* Constructs an uninitialized AudioRecord. No connection with
      * AudioFlinger takes place.
@@ -133,32 +119,22 @@ public:
      * sampleRate:         Track sampling rate in Hz.
      * format:             Audio format (e.g AUDIO_FORMAT_PCM_16_BIT for signed
      *                     16 bits per sample).
-     * channelMask:        Channel mask: see audio_channels_t.
+     * channelMask:        Channel mask.
      * frameCount:         Total size of track PCM buffer in frames. This defines the
      *                     latency of the track.
-     * flags:              A bitmask of acoustic values from enum record_flags.  It enables
-     *                     AGC, NS, and IIR.
      * cbf:                Callback function. If not null, this function is called periodically
      *                     to provide new PCM data.
+     * user:               Context for use by the callback receiver.
      * notificationFrames: The callback function is called each time notificationFrames PCM
      *                     frames are ready in record track output buffer.
-     * user                Context for use by the callback receiver.
+     * sessionId:          Not yet supported.
      */
-
-     // FIXME consider removing this alias and replacing it by audio_in_acoustics_t
-     //       or removing the parameter entirely if it is unused
-     enum record_flags {
-         RECORD_AGC_ENABLE = AUDIO_IN_ACOUSTICS_AGC_ENABLE,
-         RECORD_NS_ENABLE  = AUDIO_IN_ACOUSTICS_NS_ENABLE,
-         RECORD_IIR_ENABLE = AUDIO_IN_ACOUSTICS_TX_IIR_ENABLE,
-     };
 
                         AudioRecord(audio_source_t inputSource,
                                     uint32_t sampleRate = 0,
                                     audio_format_t format = AUDIO_FORMAT_DEFAULT,
-                                    uint32_t channelMask = AUDIO_CHANNEL_IN_MONO,
+                                    audio_channel_mask_t channelMask = AUDIO_CHANNEL_IN_MONO,
                                     int frameCount      = 0,
-                                    record_flags flags  = (record_flags) 0,
                                     callback_t cbf = NULL,
                                     void* user = NULL,
                                     int notificationFrames = 0,
@@ -166,7 +142,7 @@ public:
 
 
     /* Terminates the AudioRecord and unregisters it from AudioFlinger.
-     * Also destroys all resources assotiated with the AudioRecord.
+     * Also destroys all resources associated with the AudioRecord.
      */
                         ~AudioRecord();
 
@@ -182,9 +158,8 @@ public:
             status_t    set(audio_source_t inputSource = AUDIO_SOURCE_DEFAULT,
                             uint32_t sampleRate = 0,
                             audio_format_t format = AUDIO_FORMAT_DEFAULT,
-                            uint32_t channelMask = AUDIO_CHANNEL_IN_MONO,
+                            audio_channel_mask_t channelMask = AUDIO_CHANNEL_IN_MONO,
                             int frameCount      = 0,
-                            record_flags flags  = (record_flags) 0,
                             callback_t cbf = NULL,
                             void* user = NULL,
                             int notificationFrames = 0,
@@ -205,11 +180,10 @@ public:
      */
             uint32_t     latency() const;
 
-   /* getters, see constructor */
+   /* getters, see constructor and set() */
 
             audio_format_t format() const;
             int         channelCount() const;
-            int         channels() const;
             uint32_t    frameCount() const;
             size_t      frameSize() const;
             audio_source_t inputSource() const;
@@ -227,7 +201,7 @@ public:
      * obtainBuffer returns STOPPED. Note that obtainBuffer() still works
      * and will fill up buffers until the pool is exhausted.
      */
-            status_t    stop();
+            void        stop();
             bool        stopped() const;
 
     /* get sample rate for this record track
@@ -271,7 +245,7 @@ public:
             status_t    getPositionUpdatePeriod(uint32_t *updatePeriod) const;
 
 
-    /* Gets record head position. The position is the  total number of frames
+    /* Gets record head position. The position is the total number of frames
      * recorded since record start.
      *
      * Parameters:
@@ -294,7 +268,7 @@ public:
      */
             audio_io_handle_t    getInput() const;
 
-    /* returns the audio session ID associated to this AudioRecord.
+    /* returns the audio session ID associated with this AudioRecord.
      *
      * Parameters:
      *  none.
@@ -342,57 +316,72 @@ private:
             AudioRecord& operator = (const AudioRecord& other);
 
     /* a small internal class to handle the callback */
-    class ClientRecordThread : public Thread
+    class AudioRecordThread : public Thread
     {
     public:
-        ClientRecordThread(AudioRecord& receiver, bool bCanCallJava = false);
+        AudioRecordThread(AudioRecord& receiver, bool bCanCallJava = false);
+
+        // Do not call Thread::requestExitAndWait() without first calling requestExit().
+        // Thread::requestExitAndWait() is not virtual, and the implementation doesn't do enough.
+        virtual void        requestExit();
+
+                void        pause();    // suspend thread from execution at next loop boundary
+                void        resume();   // allow thread to execute, if not requested to exit
+
     private:
         friend class AudioRecord;
         virtual bool        threadLoop();
-        virtual status_t    readyToRun();
-        virtual void        onFirstRef() {}
         AudioRecord& mReceiver;
+        virtual ~AudioRecordThread();
+        Mutex               mMyLock;    // Thread::mLock is private
+        Condition           mMyCond;    // Thread::mThreadExitedCondition is private
+        bool                mPaused;    // whether thread is currently paused
     };
 
-            bool processAudioBuffer(const sp<ClientRecordThread>& thread);
+            // body of AudioRecordThread::threadLoop()
+            bool processAudioBuffer(const sp<AudioRecordThread>& thread);
+
             status_t openRecord_l(uint32_t sampleRate,
                                 audio_format_t format,
-                                uint32_t channelMask,
+                                audio_channel_mask_t channelMask,
                                 int frameCount,
                                 audio_io_handle_t input);
             audio_io_handle_t getInput_l();
             status_t restoreRecord_l(audio_track_cblk_t*& cblk);
 
-    sp<IAudioRecord>        mAudioRecord;
-    sp<IMemory>             mCblkMemory;
-    sp<ClientRecordThread>  mClientRecordThread;
-    status_t                mReadyToRun;
+    sp<AudioRecordThread>   mAudioRecordThread;
     mutable Mutex           mLock;
-    Condition               mCondition;
 
+    bool                    mActive;            // protected by mLock
+
+    // for client callback handler
+    callback_t              mCbf;
+    void*                   mUserData;
+
+    // for notification APIs
+    uint32_t                mNotificationFrames;
+    uint32_t                mRemainingFrames;
+    uint32_t                mMarkerPosition;    // in frames
+    bool                    mMarkerReached;
+    uint32_t                mNewPosition;       // in frames
+    uint32_t                mUpdatePeriod;      // in ms
+
+    // constant after constructor or set()
     uint32_t                mFrameCount;
-
-    audio_track_cblk_t*     mCblk;
     audio_format_t          mFormat;
     uint8_t                 mChannelCount;
     audio_source_t          mInputSource;
     status_t                mStatus;
     uint32_t                mLatency;
-
-    volatile int32_t        mActive;
-
-    callback_t              mCbf;
-    void*                   mUserData;
-    uint32_t                mNotificationFrames;
-    uint32_t                mRemainingFrames;
-    uint32_t                mMarkerPosition;
-    bool                    mMarkerReached;
-    uint32_t                mNewPosition;
-    uint32_t                mUpdatePeriod;
-    record_flags            mFlags;
-    uint32_t                mChannelMask;
-    audio_io_handle_t       mInput;
+    audio_channel_mask_t    mChannelMask;
+    audio_io_handle_t       mInput;                     // returned by AudioSystem::getInput()
     int                     mSessionId;
+
+    // may be changed if IAudioRecord object is re-created
+    sp<IAudioRecord>        mAudioRecord;
+    sp<IMemory>             mCblkMemory;
+    audio_track_cblk_t*     mCblk;
+
     int                     mPreviousPriority;          // before start()
     SchedPolicy             mPreviousSchedulingGroup;
 };

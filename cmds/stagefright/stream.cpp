@@ -19,6 +19,7 @@
 #include "utils/Log.h"
 
 #include <binder/ProcessState.h>
+#include <cutils/properties.h> // for property_get
 
 #include <media/IStreamSource.h>
 #include <media/mediaplayer.h>
@@ -32,9 +33,11 @@
 
 #include <binder/IServiceManager.h>
 #include <media/IMediaPlayerService.h>
+#include <gui/ISurfaceComposer.h>
 #include <gui/SurfaceComposerClient.h>
 
 #include <fcntl.h>
+#include <ui/DisplayInfo.h>
 
 using namespace android;
 
@@ -304,15 +307,18 @@ int main(int argc, char **argv) {
     sp<SurfaceComposerClient> composerClient = new SurfaceComposerClient;
     CHECK_EQ(composerClient->initCheck(), (status_t)OK);
 
-    ssize_t displayWidth = composerClient->getDisplayWidth(0);
-    ssize_t displayHeight = composerClient->getDisplayHeight(0);
+    sp<IBinder> display(SurfaceComposerClient::getBuiltInDisplay(
+            ISurfaceComposer::eDisplayIdMain));
+    DisplayInfo info;
+    SurfaceComposerClient::getDisplayInfo(display, &info);
+    ssize_t displayWidth = info.w;
+    ssize_t displayHeight = info.h;
 
     ALOGV("display is %d x %d\n", displayWidth, displayHeight);
 
     sp<SurfaceControl> control =
         composerClient->createSurface(
                 String8("A Surface"),
-                0,
                 displayWidth,
                 displayHeight,
                 PIXEL_FORMAT_RGB_565,
@@ -339,8 +345,16 @@ int main(int argc, char **argv) {
 
     sp<IStreamSource> source;
 
+    char prop[PROPERTY_VALUE_MAX];
+    bool usemp4 = property_get("media.stagefright.use-mp4source", prop, NULL) &&
+            (!strcmp(prop, "1") || !strcasecmp(prop, "true"));
+
     size_t len = strlen(argv[1]);
-    if (len >= 3 && !strcasecmp(".ts", &argv[1][len - 3])) {
+    if ((!usemp4 && len >= 3 && !strcasecmp(".ts", &argv[1][len - 3])) ||
+        (usemp4 && len >= 4 &&
+         (!strcasecmp(".mp4", &argv[1][len - 4])
+            || !strcasecmp(".3gp", &argv[1][len- 4])
+            || !strcasecmp(".3g2", &argv[1][len- 4])))) {
         int fd = open(argv[1], O_RDONLY);
 
         if (fd < 0) {

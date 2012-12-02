@@ -110,6 +110,31 @@ status_t StagefrightMetadataRetriever::setDataSource(
     return OK;
 }
 
+static bool isYUV420PlanarSupported(
+            OMXClient *client,
+            const sp<MetaData> &trackMeta) {
+
+    const char *mime;
+    CHECK(trackMeta->findCString(kKeyMIMEType, &mime));
+
+    Vector<CodecCapabilities> caps;
+    if (QueryCodecs(client->interface(), mime,
+                    true, /* queryDecoders */
+                    true, /* hwCodecOnly */
+                    &caps) == OK) {
+
+        for (size_t j = 0; j < caps.size(); ++j) {
+            CodecCapabilities cap = caps[j];
+            for (size_t i = 0; i < cap.mColorFormats.size(); ++i) {
+                if (cap.mColorFormats[i] == OMX_COLOR_FormatYUV420Planar) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 static VideoFrame *extractVideoFrameWithCodecFlags(
         OMXClient *client,
         const sp<MetaData> &trackMeta,
@@ -117,9 +142,19 @@ static VideoFrame *extractVideoFrameWithCodecFlags(
         uint32_t flags,
         int64_t frameTimeUs,
         int seekMode) {
+
+    sp<MetaData> format = source->getFormat();
+
+    // XXX:
+    // Once all vendors support OMX_COLOR_FormatYUV420Planar, we can
+    // remove this check and always set the decoder output color format
+    if (isYUV420PlanarSupported(client, trackMeta)) {
+        format->setInt32(kKeyColorFormat, OMX_COLOR_FormatYUV420Planar);
+    }
+
     sp<MediaSource> decoder =
         OMXCodec::Create(
-                client->interface(), source->getFormat(), false, source,
+                client->interface(), format, false, source,
                 NULL, flags | OMXCodec::kClientNeedsFramebuffer);
 
     if (decoder.get() == NULL) {
@@ -462,6 +497,7 @@ void StagefrightMetadataRetriever::parseMetaData() {
     int32_t videoWidth = -1;
     int32_t videoHeight = -1;
     int32_t audioBitrate = -1;
+    int32_t rotationAngle = -1;
 
     // The overall duration is the duration of the longest track.
     int64_t maxDurationUs = 0;
@@ -489,6 +525,9 @@ void StagefrightMetadataRetriever::parseMetaData() {
 
                 CHECK(trackMeta->findInt32(kKeyWidth, &videoWidth));
                 CHECK(trackMeta->findInt32(kKeyHeight, &videoHeight));
+                if (!trackMeta->findInt32(kKeyRotation, &rotationAngle)) {
+                    rotationAngle = 0;
+                }
             } else if (!strcasecmp(mime, MEDIA_MIMETYPE_TEXT_3GPP)) {
                 const char *lang;
                 trackMeta->findCString(kKeyMediaLanguage, &lang);
@@ -521,6 +560,9 @@ void StagefrightMetadataRetriever::parseMetaData() {
 
         sprintf(tmp, "%d", videoHeight);
         mMetaData.add(METADATA_KEY_VIDEO_HEIGHT, String8(tmp));
+
+        sprintf(tmp, "%d", rotationAngle);
+        mMetaData.add(METADATA_KEY_VIDEO_ROTATION, String8(tmp));
     }
 
     if (numTracks == 1 && hasAudio && audioBitrate >= 0) {

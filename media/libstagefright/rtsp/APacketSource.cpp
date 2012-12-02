@@ -110,13 +110,11 @@ static sp<ABuffer> MakeAVCCodecSpecificData(
     *height = 0;
 
     AString val;
-    if (!GetAttribute(params, "profile-level-id", &val)) {
-        return NULL;
+    sp<ABuffer> profileLevelID = NULL;
+    if (GetAttribute(params, "profile-level-id", &val)) {
+        profileLevelID = decodeHex(val);
+        CHECK_EQ(profileLevelID->size(), 3u);
     }
-
-    sp<ABuffer> profileLevelID = decodeHex(val);
-    CHECK(profileLevelID != NULL);
-    CHECK_EQ(profileLevelID->size(), 3u);
 
     Vector<sp<ABuffer> > paramSets;
 
@@ -176,8 +174,15 @@ static sp<ABuffer> MakeAVCCodecSpecificData(
     uint8_t *out = csd->data();
 
     *out++ = 0x01;  // configurationVersion
-    memcpy(out, profileLevelID->data(), 3);
-    out += 3;
+    if (profileLevelID != NULL) {
+        memcpy(out, profileLevelID->data(), 3);
+        out += 3;
+    } else {
+        *out++ = 0x42; // Baseline profile
+        *out++ = 0xE0; // Common subset for all profiles
+        *out++ = 0x0A; // Level 1
+    }
+
     *out++ = (0x3f << 2) | 1;  // lengthSize == 2 bytes
     *out++ = 0xe0 | numSeqParameterSets;
 
@@ -561,6 +566,8 @@ APacketSource::APacketSource(
                 codecSpecificData->data(), codecSpecificData->size());
     } else if (ARawAudioAssembler::Supports(desc.c_str())) {
         ARawAudioAssembler::MakeFormat(desc.c_str(), mFormat);
+    } else if (!strncasecmp("MP2T/", desc.c_str(), 5)) {
+        mFormat->setCString(kKeyMIMEType, MEDIA_MIMETYPE_CONTAINER_MPEG2TS);
     } else {
         mInitCheck = ERROR_UNSUPPORTED;
     }

@@ -55,19 +55,23 @@ struct NuPlayer : public AHandler {
     // Will notify the driver through "notifySeekComplete" once finished.
     void seekToAsync(int64_t seekTimeUs);
 
+    status_t setVideoScalingMode(int32_t mode);
+
 protected:
     virtual ~NuPlayer();
 
     virtual void onMessageReceived(const sp<AMessage> &msg);
 
+public:
+    struct NuPlayerStreamListener;
+    struct Source;
+
 private:
     struct Decoder;
     struct GenericSource;
     struct HTTPLiveSource;
-    struct NuPlayerStreamListener;
     struct Renderer;
     struct RTSPSource;
-    struct Source;
     struct StreamingSource;
 
     enum {
@@ -127,6 +131,8 @@ private:
 
     int64_t mVideoLateByUs;
     int64_t mNumFramesTotal, mNumFramesDropped;
+
+    int32_t mVideoScalingMode;
 
     status_t instantiateDecoder(bool audio, sp<Decoder> *decoder);
 

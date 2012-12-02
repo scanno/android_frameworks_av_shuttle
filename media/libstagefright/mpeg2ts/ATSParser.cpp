@@ -51,7 +51,8 @@ struct ATSParser::Program : public RefBase {
             unsigned pid, ABitReader *br, status_t *err);
 
     bool parsePID(
-            unsigned pid, unsigned payload_unit_start_indicator,
+            unsigned pid, unsigned continuity_counter,
+            unsigned payload_unit_start_indicator,
             ABitReader *br, status_t *err);
 
     void signalDiscontinuity(
@@ -77,6 +78,10 @@ struct ATSParser::Program : public RefBase {
         return mProgramMapPID;
     }
 
+    uint32_t parserFlags() const {
+        return mParser->mFlags;
+    }
+
 private:
     ATSParser *mParser;
     unsigned mProgramNumber;
@@ -91,13 +96,17 @@ private:
 };
 
 struct ATSParser::Stream : public RefBase {
-    Stream(Program *program, unsigned elementaryPID, unsigned streamType);
+    Stream(Program *program,
+           unsigned elementaryPID,
+           unsigned streamType,
+           unsigned PCR_PID);
 
     unsigned type() const { return mStreamType; }
     unsigned pid() const { return mElementaryPID; }
     void setPID(unsigned pid) { mElementaryPID = pid; }
 
     status_t parse(
+            unsigned continuity_counter,
             unsigned payload_unit_start_indicator,
             ABitReader *br);
 
@@ -115,10 +124,14 @@ private:
     Program *mProgram;
     unsigned mElementaryPID;
     unsigned mStreamType;
+    unsigned mPCR_PID;
+    int32_t mExpectedContinuityCounter;
 
     sp<ABuffer> mBuffer;
     sp<AnotherPacketSource> mSource;
     bool mPayloadStarted;
+
+    uint64_t mPrevPTS;
 
     ElementaryStreamQueue *mQueue;
 
@@ -184,7 +197,8 @@ bool ATSParser::Program::parsePSISection(
 }
 
 bool ATSParser::Program::parsePID(
-        unsigned pid, unsigned payload_unit_start_indicator,
+        unsigned pid, unsigned continuity_counter,
+        unsigned payload_unit_start_indicator,
         ABitReader *br, status_t *err) {
     *err = OK;
 
@@ -194,7 +208,7 @@ bool ATSParser::Program::parsePID(
     }
 
     *err = mStreams.editValueAt(index)->parse(
-            payload_unit_start_indicator, br);
+            continuity_counter, payload_unit_start_indicator, br);
 
     return true;
 }
@@ -241,7 +255,10 @@ status_t ATSParser::Program::parseProgramMap(ABitReader *br) {
     MY_LOGV("  section_number = %u", br->getBits(8));
     MY_LOGV("  last_section_number = %u", br->getBits(8));
     MY_LOGV("  reserved = %u", br->getBits(3));
-    MY_LOGV("  PCR_PID = 0x%04x", br->getBits(13));
+
+    unsigned PCR_PID = br->getBits(13);
+    ALOGV("  PCR_PID = 0x%04x", PCR_PID);
+
     MY_LOGV("  reserved = %u", br->getBits(4));
 
     unsigned program_info_length = br->getBits(12);
@@ -382,7 +399,9 @@ status_t ATSParser::Program::parseProgramMap(ABitReader *br) {
         ssize_t index = mStreams.indexOfKey(info.mPID);
 
         if (index < 0) {
-            sp<Stream> stream = new Stream(this, info.mPID, info.mType);
+            sp<Stream> stream = new Stream(
+                    this, info.mPID, info.mType, PCR_PID);
+
             mStreams.add(info.mPID, stream);
         }
     }
@@ -419,21 +438,36 @@ int64_t ATSParser::Program::convertPTSToTimestamp(uint64_t PTS) {
         }
     }
 
-    return (PTS * 100) / 9;
+    int64_t timeUs = (PTS * 100) / 9;
+
+    if (mParser->mAbsoluteTimeAnchorUs >= 0ll) {
+        timeUs += mParser->mAbsoluteTimeAnchorUs;
+    }
+
+    return timeUs;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 ATSParser::Stream::Stream(
-        Program *program, unsigned elementaryPID, unsigned streamType)
+        Program *program,
+        unsigned elementaryPID,
+        unsigned streamType,
+        unsigned PCR_PID)
     : mProgram(program),
       mElementaryPID(elementaryPID),
       mStreamType(streamType),
+      mPCR_PID(PCR_PID),
+      mExpectedContinuityCounter(-1),
       mPayloadStarted(false),
+      mPrevPTS(0),
       mQueue(NULL) {
     switch (mStreamType) {
         case STREAMTYPE_H264:
-            mQueue = new ElementaryStreamQueue(ElementaryStreamQueue::H264);
+            mQueue = new ElementaryStreamQueue(
+                    ElementaryStreamQueue::H264,
+                    (mProgram->parserFlags() & ALIGNED_VIDEO_DATA)
+                        ? ElementaryStreamQueue::kFlag_AlignedData : 0);
             break;
         case STREAMTYPE_MPEG2_AUDIO_ADTS:
             mQueue = new ElementaryStreamQueue(ElementaryStreamQueue::AAC);
@@ -455,6 +489,11 @@ ATSParser::Stream::Stream(
                     ElementaryStreamQueue::MPEG4_VIDEO);
             break;
 
+        case STREAMTYPE_PCM_AUDIO:
+            mQueue = new ElementaryStreamQueue(
+                    ElementaryStreamQueue::PCM_AUDIO);
+            break;
+
         default:
             break;
     }
@@ -473,10 +512,24 @@ ATSParser::Stream::~Stream() {
 }
 
 status_t ATSParser::Stream::parse(
+        unsigned continuity_counter,
         unsigned payload_unit_start_indicator, ABitReader *br) {
     if (mQueue == NULL) {
         return OK;
     }
+
+    if (mExpectedContinuityCounter >= 0
+            && (unsigned)mExpectedContinuityCounter != continuity_counter) {
+        ALOGI("discontinuity on stream pid 0x%04x", mElementaryPID);
+
+        mPayloadStarted = false;
+        mBuffer->setRange(0, 0);
+        mExpectedContinuityCounter = -1;
+
+        return OK;
+    }
+
+    mExpectedContinuityCounter = (continuity_counter + 1) & 0x0f;
 
     if (payload_unit_start_indicator) {
         if (mPayloadStarted) {
@@ -538,6 +591,7 @@ bool ATSParser::Stream::isAudio() const {
         case STREAMTYPE_MPEG1_AUDIO:
         case STREAMTYPE_MPEG2_AUDIO:
         case STREAMTYPE_MPEG2_AUDIO_ADTS:
+        case STREAMTYPE_PCM_AUDIO:
             return true;
 
         default:
@@ -547,6 +601,8 @@ bool ATSParser::Stream::isAudio() const {
 
 void ATSParser::Stream::signalDiscontinuity(
         DiscontinuityType type, const sp<AMessage> &extra) {
+    mExpectedContinuityCounter = -1;
+
     if (mQueue == NULL) {
         return;
     }
@@ -664,8 +720,7 @@ status_t ATSParser::Stream::parsePES(ABitReader *br) {
             PTS |= br->getBits(15);
             CHECK_EQ(br->getBits(1), 1u);
 
-            ALOGV("PTS = %llu", PTS);
-            // ALOGI("PTS = %.2f secs", PTS / 90000.0f);
+            ALOGV("PTS = 0x%016llx (%.2f)", PTS, PTS / 90000.0);
 
             optional_bytes_remaining -= 5;
 
@@ -781,6 +836,14 @@ status_t ATSParser::Stream::flush() {
 void ATSParser::Stream::onPayloadData(
         unsigned PTS_DTS_flags, uint64_t PTS, uint64_t DTS,
         const uint8_t *data, size_t size) {
+#if 0
+    ALOGI("payload streamType 0x%02x, PTS = 0x%016llx, dPTS = %lld",
+          mStreamType,
+          PTS,
+          (int64_t)PTS - mPrevPTS);
+    mPrevPTS = PTS;
+#endif
+
     ALOGV("onPayloadData mStreamType=0x%02x", mStreamType);
 
     int64_t timeUs = 0ll;  // no presentation timestamp available.
@@ -847,7 +910,10 @@ sp<MediaSource> ATSParser::Stream::getSource(SourceType type) {
 ////////////////////////////////////////////////////////////////////////////////
 
 ATSParser::ATSParser(uint32_t flags)
-    : mFlags(flags) {
+    : mFlags(flags),
+      mAbsoluteTimeAnchorUs(-1ll),
+      mNumTSPacketsParsed(0),
+      mNumPCRs(0) {
     mPSISections.add(0 /* PID */, new PSISection);
 }
 
@@ -863,6 +929,15 @@ status_t ATSParser::feedTSPacket(const void *data, size_t size) {
 
 void ATSParser::signalDiscontinuity(
         DiscontinuityType type, const sp<AMessage> &extra) {
+    if (type == DISCONTINUITY_ABSOLUTE_TIME) {
+        int64_t timeUs;
+        CHECK(extra->findInt64("timeUs", &timeUs));
+
+        CHECK(mPrograms.empty());
+        mAbsoluteTimeAnchorUs = timeUs;
+        return;
+    }
+
     for (size_t i = 0; i < mPrograms.size(); ++i) {
         mPrograms.editItemAt(i)->signalDiscontinuity(type, extra);
     }
@@ -942,6 +1017,7 @@ void ATSParser::parseProgramAssociationTable(ABitReader *br) {
 
 status_t ATSParser::parsePID(
         ABitReader *br, unsigned PID,
+        unsigned continuity_counter,
         unsigned payload_unit_start_indicator) {
     ssize_t sectionIndex = mPSISections.indexOfKey(PID);
 
@@ -1002,7 +1078,8 @@ status_t ATSParser::parsePID(
     for (size_t i = 0; i < mPrograms.size(); ++i) {
         status_t err;
         if (mPrograms.editItemAt(i)->parsePID(
-                    PID, payload_unit_start_indicator, br, &err)) {
+                    PID, continuity_counter, payload_unit_start_indicator,
+                    br, &err)) {
             if (err != OK) {
                 return err;
             }
@@ -1019,10 +1096,55 @@ status_t ATSParser::parsePID(
     return OK;
 }
 
-void ATSParser::parseAdaptationField(ABitReader *br) {
+void ATSParser::parseAdaptationField(ABitReader *br, unsigned PID) {
     unsigned adaptation_field_length = br->getBits(8);
+
     if (adaptation_field_length > 0) {
-        br->skipBits(adaptation_field_length * 8);  // XXX
+        unsigned discontinuity_indicator = br->getBits(1);
+
+        if (discontinuity_indicator) {
+            ALOGV("PID 0x%04x: discontinuity_indicator = 1 (!!!)", PID);
+        }
+
+        br->skipBits(2);
+        unsigned PCR_flag = br->getBits(1);
+
+        size_t numBitsRead = 4;
+
+        if (PCR_flag) {
+            br->skipBits(4);
+            uint64_t PCR_base = br->getBits(32);
+            PCR_base = (PCR_base << 1) | br->getBits(1);
+
+            br->skipBits(6);
+            unsigned PCR_ext = br->getBits(9);
+
+            // The number of bytes from the start of the current
+            // MPEG2 transport stream packet up and including
+            // the final byte of this PCR_ext field.
+            size_t byteOffsetFromStartOfTSPacket =
+                (188 - br->numBitsLeft() / 8);
+
+            uint64_t PCR = PCR_base * 300 + PCR_ext;
+
+            ALOGV("PID 0x%04x: PCR = 0x%016llx (%.2f)",
+                  PID, PCR, PCR / 27E6);
+
+            // The number of bytes received by this parser up to and
+            // including the final byte of this PCR_ext field.
+            size_t byteOffsetFromStart =
+                mNumTSPacketsParsed * 188 + byteOffsetFromStartOfTSPacket;
+
+            for (size_t i = 0; i < mPrograms.size(); ++i) {
+                updatePCR(PID, PCR, byteOffsetFromStart);
+            }
+
+            numBitsRead += 52;
+        }
+
+        CHECK_GE(adaptation_field_length * 8, numBitsRead);
+
+        br->skipBits(adaptation_field_length * 8 - numBitsRead);
     }
 }
 
@@ -1048,19 +1170,24 @@ status_t ATSParser::parseTS(ABitReader *br) {
     ALOGV("adaptation_field_control = %u", adaptation_field_control);
 
     unsigned continuity_counter = br->getBits(4);
-    ALOGV("continuity_counter = %u", continuity_counter);
+    ALOGV("PID = 0x%04x, continuity_counter = %u", PID, continuity_counter);
 
     // ALOGI("PID = 0x%04x, continuity_counter = %u", PID, continuity_counter);
 
     if (adaptation_field_control == 2 || adaptation_field_control == 3) {
-        parseAdaptationField(br);
+        parseAdaptationField(br, PID);
     }
+
+    status_t err = OK;
 
     if (adaptation_field_control == 1 || adaptation_field_control == 3) {
-        return parsePID(br, PID, payload_unit_start_indicator);
+        err = parsePID(
+                br, PID, continuity_counter, payload_unit_start_indicator);
     }
 
-    return OK;
+    ++mNumTSPacketsParsed;
+
+    return err;
 }
 
 sp<MediaSource> ATSParser::getSource(SourceType type) {
@@ -1089,6 +1216,31 @@ bool ATSParser::PTSTimeDeltaEstablished() {
     }
 
     return mPrograms.editItemAt(0)->PTSTimeDeltaEstablished();
+}
+
+void ATSParser::updatePCR(
+        unsigned PID, uint64_t PCR, size_t byteOffsetFromStart) {
+    ALOGV("PCR 0x%016llx @ %d", PCR, byteOffsetFromStart);
+
+    if (mNumPCRs == 2) {
+        mPCR[0] = mPCR[1];
+        mPCRBytes[0] = mPCRBytes[1];
+        mSystemTimeUs[0] = mSystemTimeUs[1];
+        mNumPCRs = 1;
+    }
+
+    mPCR[mNumPCRs] = PCR;
+    mPCRBytes[mNumPCRs] = byteOffsetFromStart;
+    mSystemTimeUs[mNumPCRs] = ALooper::GetNowUs();
+
+    ++mNumPCRs;
+
+    if (mNumPCRs == 2) {
+        double transportRate =
+            (mPCRBytes[1] - mPCRBytes[0]) * 27E6 / (mPCR[1] - mPCR[0]);
+
+        ALOGV("transportRate = %.2f bytes/sec", transportRate);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////

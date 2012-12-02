@@ -31,11 +31,12 @@ namespace android {
 class AudioRecord;
 
 struct AudioSource : public MediaSource, public MediaBufferObserver {
-    // Note that the "channels" parameter is _not_ the number of channels,
-    // but a bitmask of audio_channels_t constants.
+    // Note that the "channels" parameter _is_ the number of channels,
+    // _not_ a bitmask of audio_channels_t constants.
     AudioSource(
-            audio_source_t inputSource, uint32_t sampleRate,
-            uint32_t channels = AUDIO_CHANNEL_IN_MONO);
+            audio_source_t inputSource,
+            uint32_t sampleRate,
+            uint32_t channels = 1);
 
     status_t initCheck() const;
 
@@ -49,7 +50,7 @@ struct AudioSource : public MediaSource, public MediaBufferObserver {
     virtual status_t read(
             MediaBuffer **buffer, const ReadOptions *options = NULL);
 
-    status_t dataCallbackTimestamp(const AudioRecord::Buffer& buffer, int64_t timeUs);
+    status_t dataCallback(const AudioRecord::Buffer& buffer);
     virtual void signalBufferReturned(MediaBuffer *buffer);
 
 protected:

@@ -69,6 +69,9 @@ private:
 
     int64_t mNumTSPacketsWritten;
     int64_t mNumTSPacketsBeforeMeta;
+    int mPATContinuityCounter;
+    int mPMTContinuityCounter;
+    uint32_t mCrcTable[256];
 
     void init();
 
@@ -76,6 +79,8 @@ private:
     void writeProgramAssociationTable();
     void writeProgramMap();
     void writeAccessUnit(int32_t sourceIndex, const sp<ABuffer> &buffer);
+    void initCrcTable();
+    uint32_t crc32(const uint8_t *start, size_t length);
 
     ssize_t internalWrite(const void *data, size_t size);
     status_t reset();

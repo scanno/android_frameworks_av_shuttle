@@ -517,6 +517,10 @@ int AecSetDevice(preproc_effect_t *effect, uint32_t device)
     webrtc::EchoControlMobile *aec = static_cast<webrtc::EchoControlMobile *>(effect->engine);
     webrtc::EchoControlMobile::RoutingMode mode = webrtc::EchoControlMobile::kQuietEarpieceOrHeadset;
 
+    if (audio_is_input_device(device)) {
+        return 0;
+    }
+
     switch(device) {
     case AUDIO_DEVICE_OUT_EARPIECE:
         mode = webrtc::EchoControlMobile::kEarpiece;
@@ -1700,7 +1704,7 @@ int PreProcessingFx_GetDescriptor(effect_handle_t   self,
         return -EINVAL;
     }
 
-    memcpy(pDescriptor, sDescriptors[effect->procId], sizeof(effect_descriptor_t));
+    *pDescriptor = *sDescriptors[effect->procId];
 
     return 0;
 }
@@ -1834,7 +1838,7 @@ int PreProcessingLib_QueryEffect(uint32_t index, effect_descriptor_t *pDescripto
     if (index >= PREPROC_NUM_EFFECTS) {
         return -EINVAL;
     }
-    memcpy(pDescriptor, sDescriptors[index], sizeof(effect_descriptor_t));
+    *pDescriptor = *sDescriptors[index];
     return 0;
 }
 
@@ -1905,7 +1909,7 @@ int PreProcessingLib_GetDescriptor(const effect_uuid_t *uuid,
 
     ALOGV("PreProcessingLib_GetDescriptor() got fx %s", desc->name);
 
-    memcpy(pDescriptor, desc, sizeof(effect_descriptor_t));
+    *pDescriptor = *desc;
     return 0;
 }
 

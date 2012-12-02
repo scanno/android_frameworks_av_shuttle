@@ -121,6 +121,15 @@ int64_t WVMExtractor::getCachedDurationUs(status_t *finalStatus) {
     return mImpl->getCachedDurationUs(finalStatus);
 }
 
+status_t WVMExtractor::getEstimatedBandwidthKbps(int32_t *kbps) {
+    if (mImpl == NULL) {
+        return UNKNOWN_ERROR;
+    }
+
+    return mImpl->getEstimatedBandwidthKbps(kbps);
+}
+
+
 void WVMExtractor::setAdaptiveStreamingMode(bool adaptive) {
     if (mImpl != NULL) {
         mImpl->setAdaptiveStreamingMode(adaptive);
@@ -136,6 +145,20 @@ void WVMExtractor::setCryptoPluginMode(bool cryptoPluginMode) {
 void WVMExtractor::setUID(uid_t uid) {
     if (mImpl != NULL) {
         mImpl->setUID(uid);
+    }
+}
+
+status_t WVMExtractor::getError() {
+    if (mImpl == NULL) {
+       return UNKNOWN_ERROR;
+    }
+
+    return mImpl->getError();
+}
+
+void WVMExtractor::setError(status_t err) {
+    if (mImpl != NULL) {
+        mImpl->setError(err);
     }
 }
 

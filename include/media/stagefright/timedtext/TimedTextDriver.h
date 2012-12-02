@@ -64,6 +64,7 @@ private:
 
     enum State {
         UNINITIALIZED,
+        PREPARED,
         PLAYING,
         PAUSED,
     };

@@ -20,6 +20,8 @@
 
 #include "NuPlayerSource.h"
 
+#include "ATSParser.h"
+
 #include <media/stagefright/foundation/AHandlerReflector.h>
 
 namespace android {
@@ -40,7 +42,6 @@ struct NuPlayer::RTSPSource : public NuPlayer::Source {
 
     virtual status_t feedMoreTSData();
 
-    virtual sp<MetaData> getFormat(bool audio);
     virtual status_t dequeueAccessUnit(bool audio, sp<ABuffer> *accessUnit);
 
     virtual status_t getDuration(int64_t *durationUs);
@@ -51,6 +52,8 @@ struct NuPlayer::RTSPSource : public NuPlayer::Source {
 
 protected:
     virtual ~RTSPSource();
+
+    virtual sp<MetaData> getFormatMeta(bool audio);
 
 private:
     enum {
@@ -97,6 +100,8 @@ private:
     Vector<TrackInfo> mTracks;
     sp<AnotherPacketSource> mAudioTrack;
     sp<AnotherPacketSource> mVideoTrack;
+
+    sp<ATSParser> mTSParser;
 
     int32_t mSeekGeneration;
 

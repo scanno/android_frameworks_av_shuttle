@@ -165,11 +165,12 @@ public:
      * Retrieves the mime type embedded inside the original content
      *
      * @param[in] uniqueId Unique identifier for a session
-     * @param[in] path Path of the protected content
+     * @param[in] path Path of the content or null.
+     * @param[in] fd File descriptor of the protected content
      * @return String8
      *     Returns mime-type of the original content, such as "video/mpeg"
      */
-    virtual String8 getOriginalMimeType(int uniqueId, const String8& path) = 0;
+    virtual String8 getOriginalMimeType(int uniqueId, const String8& path, int fd) = 0;
 
     /**
      * Retrieves the type of the protected object (content, rights, etc..)
@@ -343,6 +344,19 @@ public:
     virtual status_t openDecryptSession(
         int uniqueId, DecryptHandle* decryptHandle,
         const char* uri, const char* mime) = 0;
+
+    /**
+     * Open the decrypt session to decrypt the given protected content
+     *
+     * @param[in] uniqueId Unique identifier for a session
+     * @param[in] decryptHandle Handle for the current decryption session
+     * @param[in] buf Data to initiate decrypt session
+     * @param[in] mimeType Mime type of the protected content
+     * @return
+     *     DRM_ERROR_CANNOT_HANDLE for failure and DRM_NO_ERROR for success
+     */
+    virtual status_t openDecryptSession(int uniqueId, DecryptHandle* decryptHandle,
+            const DrmBuffer& buf, const String8& mimeType) = 0;
 
     /**
      * Close the decrypt session for the given handle

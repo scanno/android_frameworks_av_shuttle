@@ -148,10 +148,11 @@ public:
      *
      * @param[in] uniqueId Unique identifier for a session
      * @param[in] path the path of the protected content
+     * @param[in] fd the file descriptor of the protected content
      * @return String8
      *     Returns mime-type of the original content, such as "video/mpeg"
      */
-    String8 getOriginalMimeType(int uniqueId, const String8& path);
+    String8 getOriginalMimeType(int uniqueId, const String8& path, int fd);
 
     /**
      * Retrieves the type of the protected object (content, rights, etc..)
@@ -318,6 +319,18 @@ public:
      */
     sp<DecryptHandle> openDecryptSession(
             int uniqueId, const char* uri, const char* mime);
+
+    /**
+     * Open the decrypt session to decrypt the given protected content
+     *
+     * @param[in] uniqueId Unique identifier for a session
+     * @param[in] buf Data to initiate decrypt session
+     * @param[in] mimeType Mime type of the protected content
+     * @return
+     *     Handle for the decryption session
+     */
+    sp<DecryptHandle> openDecryptSession(int uniqueId, const DrmBuffer& buf,
+            const String8& mimeType);
 
     /**
      * Close the decrypt session for the given handle

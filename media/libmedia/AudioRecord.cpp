@@ -18,28 +18,18 @@
 //#define LOG_NDEBUG 0
 #define LOG_TAG "AudioRecord"
 
-#include <stdint.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 
-#include <sched.h>
-#include <sys/resource.h>
+#include <binder/IPCThreadState.h>
+#include <cutils/atomic.h>
+#include <cutils/compiler.h>
+#include <media/AudioRecord.h>
+#include <media/AudioSystem.h>
+#include <system/audio.h>
+#include <utils/Log.h>
 
 #include <private/media/AudioTrackShared.h>
-
-#include <media/AudioSystem.h>
-#include <media/AudioRecord.h>
-#include <media/mediarecorder.h>
-
-#include <binder/IServiceManager.h>
-#include <utils/Log.h>
-#include <binder/Parcel.h>
-#include <binder/IPCThreadState.h>
-#include <utils/Timers.h>
-#include <utils/Atomic.h>
-
-#include <system/audio.h>
-#include <cutils/bitops.h>
-#include <cutils/compiler.h>
 
 namespace android {
 // ---------------------------------------------------------------------------
@@ -49,18 +39,23 @@ status_t AudioRecord::getMinFrameCount(
         int* frameCount,
         uint32_t sampleRate,
         audio_format_t format,
-        int channelCount)
+        audio_channel_mask_t channelMask)
 {
+    if (frameCount == NULL) return BAD_VALUE;
+
+    // default to 0 in case of error
+    *frameCount = 0;
+
     size_t size = 0;
-    if (AudioSystem::getInputBufferSize(sampleRate, format, channelCount, &size)
+    if (AudioSystem::getInputBufferSize(sampleRate, format, channelMask, &size)
             != NO_ERROR) {
         ALOGE("AudioSystem could not query the input buffer size.");
         return NO_INIT;
     }
 
     if (size == 0) {
-        ALOGE("Unsupported configuration: sampleRate %d, format %d, channelCount %d",
-            sampleRate, format, channelCount);
+        ALOGE("Unsupported configuration: sampleRate %d, format %d, channelMask %#x",
+            sampleRate, format, channelMask);
         return BAD_VALUE;
     }
 
@@ -68,6 +63,7 @@ status_t AudioRecord::getMinFrameCount(
     size <<= 1;
 
     if (audio_is_linear_pcm(format)) {
+        int channelCount = popcount(channelMask);
         size /= channelCount * audio_bytes_per_sample(format);
     }
 
@@ -87,9 +83,8 @@ AudioRecord::AudioRecord(
         audio_source_t inputSource,
         uint32_t sampleRate,
         audio_format_t format,
-        uint32_t channelMask,
+        audio_channel_mask_t channelMask,
         int frameCount,
-        record_flags flags,
         callback_t cbf,
         void* user,
         int notificationFrames,
@@ -98,7 +93,7 @@ AudioRecord::AudioRecord(
       mPreviousPriority(ANDROID_PRIORITY_NORMAL), mPreviousSchedulingGroup(SP_DEFAULT)
 {
     mStatus = set(inputSource, sampleRate, format, channelMask,
-            frameCount, flags, cbf, user, notificationFrames, sessionId);
+            frameCount, cbf, user, notificationFrames, sessionId);
 }
 
 AudioRecord::~AudioRecord()
@@ -108,9 +103,10 @@ AudioRecord::~AudioRecord()
         // it is looping on buffer empty condition in obtainBuffer().
         // Otherwise the callback thread will never exit.
         stop();
-        if (mClientRecordThread != 0) {
-            mClientRecordThread->requestExitAndWait();
-            mClientRecordThread.clear();
+        if (mAudioRecordThread != 0) {
+            mAudioRecordThread->requestExit();  // see comment in AudioRecord.h
+            mAudioRecordThread->requestExitAndWait();
+            mAudioRecordThread.clear();
         }
         mAudioRecord.clear();
         IPCThreadState::self()->flushCommands();
@@ -122,9 +118,8 @@ status_t AudioRecord::set(
         audio_source_t inputSource,
         uint32_t sampleRate,
         audio_format_t format,
-        uint32_t channelMask,
+        audio_channel_mask_t channelMask,
         int frameCount,
-        record_flags flags,
         callback_t cbf,
         void* user,
         int notificationFrames,
@@ -132,7 +127,7 @@ status_t AudioRecord::set(
         int sessionId)
 {
 
-    ALOGV("set(): sampleRate %d, channelMask %d, frameCount %d",sampleRate, channelMask, frameCount);
+    ALOGV("set(): sampleRate %d, channelMask %#x, frameCount %d",sampleRate, channelMask, frameCount);
 
     AutoMutex lock(mLock);
 
@@ -174,7 +169,6 @@ status_t AudioRecord::set(
                                                     sampleRate,
                                                     format,
                                                     channelMask,
-                                                    (audio_in_acoustics_t)flags,
                                                     mSessionId);
     if (input == 0) {
         ALOGE("Could not get audio input for record source %d", inputSource);
@@ -183,7 +177,7 @@ status_t AudioRecord::set(
 
     // validate framecount
     int minFrameCount = 0;
-    status_t status = getMinFrameCount(&minFrameCount, sampleRate, format, channelCount);
+    status_t status = getMinFrameCount(&minFrameCount, sampleRate, format, channelMask);
     if (status != NO_ERROR) {
         return status;
     }
@@ -207,7 +201,8 @@ status_t AudioRecord::set(
     }
 
     if (cbf != NULL) {
-        mClientRecordThread = new ClientRecordThread(*this, threadCanCallJava);
+        mAudioRecordThread = new AudioRecordThread(*this, threadCanCallJava);
+        mAudioRecordThread->run("AudioRecord", ANDROID_PRIORITY_AUDIO);
     }
 
     mStatus = NO_ERROR;
@@ -217,7 +212,7 @@ status_t AudioRecord::set(
     mFrameCount = mCblk->frameCount;
     mChannelCount = (uint8_t)channelCount;
     mChannelMask = channelMask;
-    mActive = 0;
+    mActive = false;
     mCbf = cbf;
     mNotificationFrames = notificationFrames;
     mRemainingFrames = notificationFrames;
@@ -229,7 +224,6 @@ status_t AudioRecord::set(
     mNewPosition = 0;
     mUpdatePeriod = 0;
     mInputSource = inputSource;
-    mFlags = flags;
     mInput = input;
     AudioSystem::acquireAudioSessionId(mSessionId);
 
@@ -282,18 +276,9 @@ audio_source_t AudioRecord::inputSource() const
 status_t AudioRecord::start(AudioSystem::sync_event_t event, int triggerSession)
 {
     status_t ret = NO_ERROR;
-    sp<ClientRecordThread> t = mClientRecordThread;
+    sp<AudioRecordThread> t = mAudioRecordThread;
 
     ALOGV("start, sync event %d trigger session %d", event, triggerSession);
-
-    if (t != 0) {
-        if (t->exitPending()) {
-            if (t->requestExitAndWait() == WOULD_BLOCK) {
-                ALOGE("AudioRecord::start called from thread");
-                return WOULD_BLOCK;
-            }
-        }
-    }
 
     AutoMutex lock(mLock);
     // acquire a strong reference on the IAudioRecord and IMemory so that they cannot be destroyed
@@ -301,22 +286,9 @@ status_t AudioRecord::start(AudioSystem::sync_event_t event, int triggerSession)
     sp<IAudioRecord> audioRecord = mAudioRecord;
     sp<IMemory> iMem = mCblkMemory;
     audio_track_cblk_t* cblk = mCblk;
-    if (mActive == 0) {
-        mActive = 1;
 
-        pid_t tid;
-        if (t != 0) {
-            mReadyToRun = WOULD_BLOCK;
-            t->run("AudioRecord", ANDROID_PRIORITY_AUDIO);
-            tid = t->getTid();  // pid_t is unknown until run()
-            ALOGV("getTid=%d", tid);
-            if (tid == -1) {
-                tid = 0;
-            }
-            // thread blocks in readyToRun()
-        } else {
-            tid = 0;    // not gettid()
-        }
+    if (!mActive) {
+        mActive = true;
 
         cblk->lock.lock();
         if (!(cblk->flags & CBLK_INVALID_MSK)) {
@@ -338,58 +310,51 @@ status_t AudioRecord::start(AudioSystem::sync_event_t event, int triggerSession)
                                             AudioSystem::kSyncRecordStartTimeOutMs;
             cblk->waitTimeMs = 0;
             if (t != 0) {
-                // thread unblocks in readyToRun() and returns NO_ERROR
-                mReadyToRun = NO_ERROR;
-                mCondition.signal();
+                t->resume();
             } else {
                 mPreviousPriority = getpriority(PRIO_PROCESS, 0);
                 get_sched_policy(0, &mPreviousSchedulingGroup);
                 androidSetThreadPriority(0, ANDROID_PRIORITY_AUDIO);
             }
         } else {
-            mActive = 0;
-            // thread unblocks in readyToRun() and returns NO_INIT
-            mReadyToRun = NO_INIT;
-            mCondition.signal();
+            mActive = false;
         }
     }
 
     return ret;
 }
 
-status_t AudioRecord::stop()
+void AudioRecord::stop()
 {
-    sp<ClientRecordThread> t = mClientRecordThread;
+    sp<AudioRecordThread> t = mAudioRecordThread;
 
     ALOGV("stop");
 
     AutoMutex lock(mLock);
-    if (mActive == 1) {
-        mActive = 0;
+    if (mActive) {
+        mActive = false;
         mCblk->cv.signal();
         mAudioRecord->stop();
         // the record head position will reset to 0, so if a marker is set, we need
         // to activate it again
         mMarkerReached = false;
         if (t != 0) {
-            t->requestExit();
+            t->pause();
         } else {
             setpriority(PRIO_PROCESS, 0, mPreviousPriority);
             set_sched_policy(0, mPreviousSchedulingGroup);
         }
     }
-
-    return NO_ERROR;
 }
 
 bool AudioRecord::stopped() const
 {
+    AutoMutex lock(mLock);
     return !mActive;
 }
 
 uint32_t AudioRecord::getSampleRate() const
 {
-    AutoMutex lock(mLock);
     return mCblk->sampleRate;
 }
 
@@ -397,6 +362,7 @@ status_t AudioRecord::setMarkerPosition(uint32_t marker)
 {
     if (mCbf == NULL) return INVALID_OPERATION;
 
+    AutoMutex lock(mLock);
     mMarkerPosition = marker;
     mMarkerReached = false;
 
@@ -407,6 +373,7 @@ status_t AudioRecord::getMarkerPosition(uint32_t *marker) const
 {
     if (marker == NULL) return BAD_VALUE;
 
+    AutoMutex lock(mLock);
     *marker = mMarkerPosition;
 
     return NO_ERROR;
@@ -418,6 +385,8 @@ status_t AudioRecord::setPositionUpdatePeriod(uint32_t updatePeriod)
 
     uint32_t curPosition;
     getPosition(&curPosition);
+
+    AutoMutex lock(mLock);
     mNewPosition = curPosition + updatePeriod;
     mUpdatePeriod = updatePeriod;
 
@@ -428,6 +397,7 @@ status_t AudioRecord::getPositionUpdatePeriod(uint32_t *updatePeriod) const
 {
     if (updatePeriod == NULL) return BAD_VALUE;
 
+    AutoMutex lock(mLock);
     *updatePeriod = mUpdatePeriod;
 
     return NO_ERROR;
@@ -445,10 +415,8 @@ status_t AudioRecord::getPosition(uint32_t *position) const
 
 unsigned int AudioRecord::getInputFramesLost() const
 {
-    if (mActive)
-        return AudioSystem::getInputFramesLost(mInput);
-    else
-        return 0;
+    // no need to check mActive, because if inactive this will return 0, which is what we want
+    return AudioSystem::getInputFramesLost(mInput);
 }
 
 // -------------------------------------------------------------------------
@@ -457,7 +425,7 @@ unsigned int AudioRecord::getInputFramesLost() const
 status_t AudioRecord::openRecord_l(
         uint32_t sampleRate,
         audio_format_t format,
-        uint32_t channelMask,
+        audio_channel_mask_t channelMask,
         int frameCount,
         audio_io_handle_t input)
 {
@@ -467,13 +435,20 @@ status_t AudioRecord::openRecord_l(
         return NO_INIT;
     }
 
+    pid_t tid = -1;
+    // FIXME see similar logic at AudioTrack
+
+    int originalSessionId = mSessionId;
     sp<IAudioRecord> record = audioFlinger->openRecord(getpid(), input,
                                                        sampleRate, format,
                                                        channelMask,
                                                        frameCount,
                                                        IAudioFlinger::TRACK_DEFAULT,
+                                                       tid,
                                                        &mSessionId,
                                                        &status);
+    ALOGE_IF(originalSessionId != 0 && mSessionId != originalSessionId,
+            "session ID changed from %d to %d", originalSessionId, mSessionId);
 
     if (record == 0) {
         ALOGE("AudioFlinger could not create record track, status: %d", status);
@@ -499,7 +474,7 @@ status_t AudioRecord::openRecord_l(
 status_t AudioRecord::obtainBuffer(Buffer* audioBuffer, int32_t waitCount)
 {
     AutoMutex lock(mLock);
-    int active;
+    bool active;
     status_t result = NO_ERROR;
     audio_track_cblk_t* cblk = mCblk;
     uint32_t framesReq = audioBuffer->frameCount;
@@ -528,7 +503,7 @@ status_t AudioRecord::obtainBuffer(Buffer* audioBuffer, int32_t waitCount)
                 result = cblk->cv.waitRelative(cblk->lock, milliseconds(waitTimeMs));
                 cblk->lock.unlock();
                 mLock.lock();
-                if (mActive == 0) {
+                if (!mActive) {
                     return status_t(STOPPED);
                 }
                 cblk->lock.lock();
@@ -613,13 +588,13 @@ audio_io_handle_t AudioRecord::getInput_l()
                                 mCblk->sampleRate,
                                 mFormat,
                                 mChannelMask,
-                                (audio_in_acoustics_t)mFlags,
                                 mSessionId);
     return mInput;
 }
 
 int AudioRecord::getSessionId() const
 {
+    // no lock needed because session ID doesn't change after first set()
     return mSessionId;
 }
 
@@ -678,7 +653,7 @@ ssize_t AudioRecord::read(void* buffer, size_t userSize)
 
 // -------------------------------------------------------------------------
 
-bool AudioRecord::processAudioBuffer(const sp<ClientRecordThread>& thread)
+bool AudioRecord::processAudioBuffer(const sp<AudioRecordThread>& thread)
 {
     Buffer audioBuffer;
     uint32_t frames = mRemainingFrames;
@@ -690,22 +665,32 @@ bool AudioRecord::processAudioBuffer(const sp<ClientRecordThread>& thread)
     sp<IAudioRecord> audioRecord = mAudioRecord;
     sp<IMemory> iMem = mCblkMemory;
     audio_track_cblk_t* cblk = mCblk;
+    bool active = mActive;
+    uint32_t markerPosition = mMarkerPosition;
+    uint32_t newPosition = mNewPosition;
+    uint32_t user = cblk->user;
+    // determine whether a marker callback will be needed, while locked
+    bool needMarker = !mMarkerReached && (mMarkerPosition > 0) && (user >= mMarkerPosition);
+    if (needMarker) {
+        mMarkerReached = true;
+    }
+    // determine the number of new position callback(s) that will be needed, while locked
+    uint32_t updatePeriod = mUpdatePeriod;
+    uint32_t needNewPos = updatePeriod > 0 && user >= newPosition ?
+            ((user - newPosition) / updatePeriod) + 1 : 0;
+    mNewPosition = newPosition + updatePeriod * needNewPos;
     mLock.unlock();
 
-    // Manage marker callback
-    if (!mMarkerReached && (mMarkerPosition > 0)) {
-        if (cblk->user >= mMarkerPosition) {
-            mCbf(EVENT_MARKER, mUserData, (void *)&mMarkerPosition);
-            mMarkerReached = true;
-        }
+    // perform marker callback, while unlocked
+    if (needMarker) {
+        mCbf(EVENT_MARKER, mUserData, &markerPosition);
     }
 
-    // Manage new position callback
-    if (mUpdatePeriod > 0) {
-        while (cblk->user >= mNewPosition) {
-            mCbf(EVENT_NEW_POS, mUserData, (void *)&mNewPosition);
-            mNewPosition += mUpdatePeriod;
-        }
+    // perform new position callback(s), while unlocked
+    for (; needNewPos > 0; --needNewPos) {
+        uint32_t temp = newPosition;
+        mCbf(EVENT_NEW_POS, mUserData, &temp);
+        newPosition += updatePeriod;
     }
 
     do {
@@ -748,10 +733,12 @@ bool AudioRecord::processAudioBuffer(const sp<ClientRecordThread>& thread)
 
 
     // Manage overrun callback
-    if (mActive && (cblk->framesAvailable() == 0)) {
+    if (active && (cblk->framesAvailable() == 0)) {
+        // The value of active is stale, but we are almost sure to be active here because
+        // otherwise we would have exited when obtainBuffer returned STOPPED earlier.
         ALOGV("Overrun user: %x, server: %x, flags %04x", cblk->user, cblk->server, cblk->flags);
         if (!(android_atomic_or(CBLK_UNDERRUN_ON, &cblk->flags) & CBLK_UNDERRUN_MSK)) {
-            mCbf(EVENT_OVERRUN, mUserData, 0);
+            mCbf(EVENT_OVERRUN, mUserData, NULL);
         }
     }
 
@@ -805,7 +792,7 @@ status_t AudioRecord::restoreRecord_l(audio_track_cblk_t*& cblk)
             result = NO_ERROR;
             cblk->lock.unlock();
         }
-        if (result != NO_ERROR || mActive == 0) {
+        if (result != NO_ERROR || !mActive) {
             result = status_t(STOPPED);
         }
     }
@@ -825,23 +812,51 @@ status_t AudioRecord::restoreRecord_l(audio_track_cblk_t*& cblk)
 
 // =========================================================================
 
-AudioRecord::ClientRecordThread::ClientRecordThread(AudioRecord& receiver, bool bCanCallJava)
-    : Thread(bCanCallJava), mReceiver(receiver)
+AudioRecord::AudioRecordThread::AudioRecordThread(AudioRecord& receiver, bool bCanCallJava)
+    : Thread(bCanCallJava), mReceiver(receiver), mPaused(true)
 {
 }
 
-bool AudioRecord::ClientRecordThread::threadLoop()
+AudioRecord::AudioRecordThread::~AudioRecordThread()
 {
-    return mReceiver.processAudioBuffer(this);
 }
 
-status_t AudioRecord::ClientRecordThread::readyToRun()
+bool AudioRecord::AudioRecordThread::threadLoop()
 {
-    AutoMutex(mReceiver.mLock);
-    while (mReceiver.mReadyToRun == WOULD_BLOCK) {
-        mReceiver.mCondition.wait(mReceiver.mLock);
+    {
+        AutoMutex _l(mMyLock);
+        if (mPaused) {
+            mMyCond.wait(mMyLock);
+            // caller will check for exitPending()
+            return true;
+        }
     }
-    return mReceiver.mReadyToRun;
+    if (!mReceiver.processAudioBuffer(this)) {
+        pause();
+    }
+    return true;
+}
+
+void AudioRecord::AudioRecordThread::requestExit()
+{
+    // must be in this order to avoid a race condition
+    Thread::requestExit();
+    resume();
+}
+
+void AudioRecord::AudioRecordThread::pause()
+{
+    AutoMutex _l(mMyLock);
+    mPaused = true;
+}
+
+void AudioRecord::AudioRecordThread::resume()
+{
+    AutoMutex _l(mMyLock);
+    if (mPaused) {
+        mPaused = false;
+        mMyCond.signal();
+    }
 }
 
 // -------------------------------------------------------------------------

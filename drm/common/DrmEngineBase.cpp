@@ -66,8 +66,8 @@ DrmInfo* DrmEngineBase::acquireDrmInfo(int uniqueId, const DrmInfoRequest* drmIn
     return onAcquireDrmInfo(uniqueId, drmInfoRequest);
 }
 
-String8 DrmEngineBase::getOriginalMimeType(int uniqueId, const String8& path) {
-    return onGetOriginalMimeType(uniqueId, path);
+String8 DrmEngineBase::getOriginalMimeType(int uniqueId, const String8& path, int fd) {
+    return onGetOriginalMimeType(uniqueId, path, fd);
 }
 
 int DrmEngineBase::getDrmObjectType(int uniqueId, const String8& path, const String8& mimeType) {
@@ -137,6 +137,11 @@ status_t DrmEngineBase::openDecryptSession(
         return onOpenDecryptSession(uniqueId, decryptHandle, uri);
     }
     return onOpenDecryptSession(uniqueId, decryptHandle, uri, mime);
+}
+
+status_t DrmEngineBase::openDecryptSession(int uniqueId, DecryptHandle* decryptHandle,
+        const DrmBuffer& buf, const String8& mimeType) {
+    return onOpenDecryptSession(uniqueId, decryptHandle, buf, mimeType);
 }
 
 status_t DrmEngineBase::closeDecryptSession(int uniqueId, DecryptHandle* decryptHandle) {

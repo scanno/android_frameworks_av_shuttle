@@ -64,7 +64,7 @@ public:
     virtual audio_io_handle_t getOutput(audio_stream_type_t stream,
                                         uint32_t samplingRate = 0,
                                         audio_format_t format = AUDIO_FORMAT_DEFAULT,
-                                        uint32_t channels = 0,
+                                        audio_channel_mask_t channelMask = 0,
                                         audio_output_flags_t flags =
                                                 AUDIO_OUTPUT_FLAG_NONE);
     virtual status_t startOutput(audio_io_handle_t output,
@@ -77,9 +77,7 @@ public:
     virtual audio_io_handle_t getInput(audio_source_t inputSource,
                                     uint32_t samplingRate = 0,
                                     audio_format_t format = AUDIO_FORMAT_DEFAULT,
-                                    uint32_t channels = 0,
-                                    audio_in_acoustics_t acoustics =
-                                            (audio_in_acoustics_t)0 /*AUDIO_IN_ACOUSTICS_NONE*/,
+                                    audio_channel_mask_t channelMask = 0,
                                     int audioSession = 0);
     virtual status_t startInput(audio_io_handle_t input);
     virtual status_t stopInput(audio_io_handle_t input);
@@ -97,8 +95,8 @@ public:
     virtual uint32_t getStrategyForStream(audio_stream_type_t stream);
     virtual audio_devices_t getDevicesForStream(audio_stream_type_t stream);
 
-    virtual audio_io_handle_t getOutputForEffect(effect_descriptor_t *desc);
-    virtual status_t registerEffect(effect_descriptor_t *desc,
+    virtual audio_io_handle_t getOutputForEffect(const effect_descriptor_t *desc);
+    virtual status_t registerEffect(const effect_descriptor_t *desc,
                                     audio_io_handle_t io,
                                     uint32_t strategy,
                                     int session,
@@ -106,6 +104,7 @@ public:
     virtual status_t unregisterEffect(int id);
     virtual status_t setEffectEnabled(int id, bool enabled);
     virtual bool isStreamActive(audio_stream_type_t stream, uint32_t inPastMs = 0) const;
+    virtual bool isSourceActive(audio_source_t source) const;
 
     virtual status_t queryDefaultPreProcessing(int audioSession,
                                               effect_descriptor_t *descriptors,

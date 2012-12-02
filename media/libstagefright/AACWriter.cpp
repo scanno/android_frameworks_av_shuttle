@@ -28,6 +28,8 @@
 #include <media/stagefright/MetaData.h>
 #include <media/mediarecorder.h>
 #include <sys/prctl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 
 namespace android {
@@ -44,7 +46,7 @@ AACWriter::AACWriter(const char *filename)
 
     ALOGV("AACWriter Constructor");
 
-    mFd = open(filename, O_CREAT | O_LARGEFILE | O_TRUNC | O_RDWR);
+    mFd = open(filename, O_CREAT | O_LARGEFILE | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
     if (mFd >= 0) {
         mInitCheck = OK;
     }
@@ -302,6 +304,7 @@ status_t AACWriter::threadFunc() {
     int64_t previousPausedDurationUs = 0;
     int64_t maxTimestampUs = 0;
     status_t err = OK;
+    bool stoppedPrematurely = true;
 
     prctl(PR_SET_NAME, (unsigned long)"AACWriterThread", 0, 0, 0);
 
@@ -370,6 +373,18 @@ status_t AACWriter::threadFunc() {
 
         buffer->release();
         buffer = NULL;
+
+        if (err != OK) {
+            break;
+        }
+
+        if (stoppedPrematurely) {
+            stoppedPrematurely = false;
+        }
+    }
+
+    if ((err == OK || err == ERROR_END_OF_STREAM) && stoppedPrematurely) {
+        err = ERROR_MALFORMED;
     }
 
     close(mFd);

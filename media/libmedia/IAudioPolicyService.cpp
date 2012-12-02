@@ -52,6 +52,7 @@ enum {
     REGISTER_EFFECT,
     UNREGISTER_EFFECT,
     IS_STREAM_ACTIVE,
+    IS_SOURCE_ACTIVE,
     GET_DEVICES_FOR_STREAM,
     QUERY_DEFAULT_PRE_PROCESSING,
     SET_EFFECT_ENABLED
@@ -123,7 +124,7 @@ public:
                                         audio_stream_type_t stream,
                                         uint32_t samplingRate,
                                         audio_format_t format,
-                                        uint32_t channels,
+                                        audio_channel_mask_t channelMask,
                                         audio_output_flags_t flags)
     {
         Parcel data, reply;
@@ -131,7 +132,7 @@ public:
         data.writeInt32(static_cast <uint32_t>(stream));
         data.writeInt32(samplingRate);
         data.writeInt32(static_cast <uint32_t>(format));
-        data.writeInt32(channels);
+        data.writeInt32(channelMask);
         data.writeInt32(static_cast <uint32_t>(flags));
         remote()->transact(GET_OUTPUT, data, &reply);
         return static_cast <audio_io_handle_t> (reply.readInt32());
@@ -175,8 +176,7 @@ public:
                                     audio_source_t inputSource,
                                     uint32_t samplingRate,
                                     audio_format_t format,
-                                    uint32_t channels,
-                                    audio_in_acoustics_t acoustics,
+                                    audio_channel_mask_t channelMask,
                                     int audioSession)
     {
         Parcel data, reply;
@@ -184,8 +184,7 @@ public:
         data.writeInt32((int32_t) inputSource);
         data.writeInt32(samplingRate);
         data.writeInt32(static_cast <uint32_t>(format));
-        data.writeInt32(channels);
-        data.writeInt32(static_cast <uint32_t>(acoustics));
+        data.writeInt32(channelMask);
         data.writeInt32(audioSession);
         remote()->transact(GET_INPUT, data, &reply);
         return static_cast <audio_io_handle_t> (reply.readInt32());
@@ -276,7 +275,7 @@ public:
         return (audio_devices_t) reply.readInt32();
     }
 
-    virtual audio_io_handle_t getOutputForEffect(effect_descriptor_t *desc)
+    virtual audio_io_handle_t getOutputForEffect(const effect_descriptor_t *desc)
     {
         Parcel data, reply;
         data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
@@ -285,7 +284,7 @@ public:
         return static_cast <audio_io_handle_t> (reply.readInt32());
     }
 
-    virtual status_t registerEffect(effect_descriptor_t *desc,
+    virtual status_t registerEffect(const effect_descriptor_t *desc,
                                         audio_io_handle_t io,
                                         uint32_t strategy,
                                         int session,
@@ -328,6 +327,15 @@ public:
         data.writeInt32((int32_t) stream);
         data.writeInt32(inPastMs);
         remote()->transact(IS_STREAM_ACTIVE, data, &reply);
+        return reply.readInt32();
+    }
+
+    virtual bool isSourceActive(audio_source_t source) const
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IAudioPolicyService::getInterfaceDescriptor());
+        data.writeInt32((int32_t) source);
+        remote()->transact(IS_SOURCE_ACTIVE, data, &reply);
         return reply.readInt32();
     }
 
@@ -417,14 +425,14 @@ status_t BnAudioPolicyService::onTransact(
                     static_cast <audio_stream_type_t>(data.readInt32());
             uint32_t samplingRate = data.readInt32();
             audio_format_t format = (audio_format_t) data.readInt32();
-            uint32_t channels = data.readInt32();
+            audio_channel_mask_t channelMask = data.readInt32();
             audio_output_flags_t flags =
                     static_cast <audio_output_flags_t>(data.readInt32());
 
             audio_io_handle_t output = getOutput(stream,
                                                  samplingRate,
                                                  format,
-                                                 channels,
+                                                 channelMask,
                                                  flags);
             reply->writeInt32(static_cast <int>(output));
             return NO_ERROR;
@@ -464,15 +472,12 @@ status_t BnAudioPolicyService::onTransact(
             audio_source_t inputSource = (audio_source_t) data.readInt32();
             uint32_t samplingRate = data.readInt32();
             audio_format_t format = (audio_format_t) data.readInt32();
-            uint32_t channels = data.readInt32();
-            audio_in_acoustics_t acoustics =
-                    static_cast <audio_in_acoustics_t>(data.readInt32());
+            audio_channel_mask_t channelMask = data.readInt32();
             int audioSession = data.readInt32();
             audio_io_handle_t input = getInput(inputSource,
                                                samplingRate,
                                                format,
-                                               channels,
-                                               acoustics,
+                                               channelMask,
                                                audioSession);
             reply->writeInt32(static_cast <int>(input));
             return NO_ERROR;
@@ -596,6 +601,13 @@ status_t BnAudioPolicyService::onTransact(
             reply->writeInt32( isStreamActive((audio_stream_type_t) stream, inPastMs) );
             return NO_ERROR;
         } break;
+
+        case IS_SOURCE_ACTIVE: {
+            CHECK_INTERFACE(IAudioPolicyService, data, reply);
+            audio_source_t source = (audio_source_t) data.readInt32();
+            reply->writeInt32( isSourceActive(source));
+            return NO_ERROR;
+        }
 
         case QUERY_DEFAULT_PRE_PROCESSING: {
             CHECK_INTERFACE(IAudioPolicyService, data, reply);

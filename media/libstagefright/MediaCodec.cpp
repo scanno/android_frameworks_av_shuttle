@@ -327,6 +327,18 @@ status_t MediaCodec::flush() {
     return PostAndAwaitResponse(msg, &response);
 }
 
+status_t MediaCodec::requestIDRFrame() {
+    (new AMessage(kWhatRequestIDRFrame, id()))->post();
+
+    return OK;
+}
+
+void MediaCodec::requestActivityNotification(const sp<AMessage> &notify) {
+    sp<AMessage> msg = new AMessage(kWhatRequestActivityNotification, id());
+    msg->setMessage("notify", notify);
+    msg->post();
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 void MediaCodec::cancelPendingDequeueOperations() {
@@ -492,6 +504,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                             sendErrorReponse = false;
 
                             mFlags |= kFlagStickyError;
+                            postActivityNotificationIfPossible();
 
                             cancelPendingDequeueOperations();
                             break;
@@ -502,6 +515,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                             sendErrorReponse = false;
 
                             mFlags |= kFlagStickyError;
+                            postActivityNotificationIfPossible();
                             break;
                         }
                     }
@@ -594,6 +608,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                             (new AMessage)->postReply(mReplyID);
                         } else {
                             mFlags |= kFlagOutputBuffersChanged;
+                            postActivityNotificationIfPossible();
                         }
                     }
                     break;
@@ -632,6 +647,7 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
 
                     mOutputFormat = msg;
                     mFlags |= kFlagOutputFormatChanged;
+                    postActivityNotificationIfPossible();
                     break;
                 }
 
@@ -663,6 +679,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                                   err);
 
                             mFlags |= kFlagStickyError;
+                            postActivityNotificationIfPossible();
+
                             cancelPendingDequeueOperations();
                         }
                         break;
@@ -674,6 +692,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         ++mDequeueInputTimeoutGeneration;
                         mFlags &= ~kFlagDequeueInputPending;
                         mDequeueInputReplyID = 0;
+                    } else {
+                        postActivityNotificationIfPossible();
                     }
                     break;
                 }
@@ -703,7 +723,10 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
                         ++mDequeueOutputTimeoutGeneration;
                         mFlags &= ~kFlagDequeueOutputPending;
                         mDequeueOutputReplyID = 0;
+                    } else {
+                        postActivityNotificationIfPossible();
                     }
+
                     break;
                 }
 
@@ -1118,7 +1141,8 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
             CHECK(msg->senderAwaitsResponse(&replyID));
 
             if ((mState != STARTED && mState != FLUSHING)
-                    || (mFlags & kFlagStickyError)) {
+                    || (mFlags & kFlagStickyError)
+                    || mOutputFormat == NULL) {
                 sp<AMessage> response = new AMessage;
                 response->setInt32("err", INVALID_OPERATION);
 
@@ -1129,6 +1153,21 @@ void MediaCodec::onMessageReceived(const sp<AMessage> &msg) {
             sp<AMessage> response = new AMessage;
             response->setMessage("format", mOutputFormat);
             response->postReply(replyID);
+            break;
+        }
+
+        case kWhatRequestIDRFrame:
+        {
+            mCodec->signalRequestIDRFrame();
+            break;
+        }
+
+        case kWhatRequestActivityNotification:
+        {
+            CHECK(mActivityNotify == NULL);
+            CHECK(msg->findMessage("notify", &mActivityNotify));
+
+            postActivityNotificationIfPossible();
             break;
         }
 
@@ -1197,6 +1236,8 @@ void MediaCodec::setState(State newState) {
         mFlags &= ~kFlagOutputFormatChanged;
         mFlags &= ~kFlagOutputBuffersChanged;
         mFlags &= ~kFlagStickyError;
+
+        mActivityNotify.clear();
     }
 
     mState = newState;
@@ -1346,7 +1387,7 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
         AString *errorDetailMsg;
         CHECK(msg->findPointer("errorDetailMsg", (void **)&errorDetailMsg));
 
-        status_t err = mCrypto->decrypt(
+        ssize_t result = mCrypto->decrypt(
                 (mFlags & kFlagIsSecure) != 0,
                 key,
                 iv,
@@ -1357,11 +1398,11 @@ status_t MediaCodec::onQueueInputBuffer(const sp<AMessage> &msg) {
                 info->mData->base(),
                 errorDetailMsg);
 
-        if (err != OK) {
-            return err;
+        if (result < 0) {
+            return result;
         }
 
-        info->mData->setRange(0, size);
+        info->mData->setRange(0, result);
     }
 
     reply->setBuffer("buffer", info->mData);
@@ -1462,6 +1503,21 @@ status_t MediaCodec::setNativeWindow(
     }
 
     return OK;
+}
+
+void MediaCodec::postActivityNotificationIfPossible() {
+    if (mActivityNotify == NULL) {
+        return;
+    }
+
+    if ((mFlags & (kFlagStickyError
+                    | kFlagOutputBuffersChanged
+                    | kFlagOutputFormatChanged))
+            || !mAvailPortBuffers[kPortIndexInput].empty()
+            || !mAvailPortBuffers[kPortIndexOutput].empty()) {
+        mActivityNotify->post();
+        mActivityNotify.clear();
+    }
 }
 
 }  // namespace android

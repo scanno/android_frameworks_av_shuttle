@@ -93,8 +93,12 @@ bool AudioMixer::isMultichannelCapable = false;
 
 effect_descriptor_t AudioMixer::dwnmFxDesc;
 
+// Ensure mConfiguredNames bitmask is initialized properly on all architectures.
+// The value of 1 << x is undefined in C when x >= 32.
+
 AudioMixer::AudioMixer(size_t frameCount, uint32_t sampleRate, uint32_t maxNumTracks)
-    :   mTrackNames(0), mConfiguredNames((1 << maxNumTracks) - 1), mSampleRate(sampleRate)
+    :   mTrackNames(0), mConfiguredNames((maxNumTracks >= 32 ? 0 : 1 << maxNumTracks) - 1),
+        mSampleRate(sampleRate)
 {
     // AudioMixer is not yet capable of multi-channel beyond stereo
     COMPILE_TIME_ASSERT_FUNCTION_SCOPE(2 == MAX_NUM_CHANNELS);
@@ -159,7 +163,7 @@ AudioMixer::~AudioMixer()
     delete [] mState.resampleTemp;
 }
 
-int AudioMixer::getTrackName(audio_channel_mask_t channelMask)
+int AudioMixer::getTrackName(audio_channel_mask_t channelMask, int sessionId)
 {
     uint32_t names = (~mTrackNames) & mConfiguredNames;
     if (names != 0) {
@@ -185,6 +189,7 @@ int AudioMixer::getTrackName(audio_channel_mask_t channelMask)
         t->enabled = false;
         t->format = 16;
         t->channelMask = AUDIO_CHANNEL_OUT_STEREO;
+        t->sessionId = sessionId;
         // setBufferProvider(name, AudioBufferProvider *) is required before enable(name)
         t->bufferProvider = NULL;
         t->downmixerBufferProvider = NULL;
@@ -266,7 +271,7 @@ status_t AudioMixer::prepareTrackForDownmix(track_t* pTrack, int trackName)
     }
 
     if (EffectCreate(&dwnmFxDesc.uuid,
-            -2 /*sessionId*/, -2 /*ioId*/,// both not relevant here, using random value
+            pTrack->sessionId /*sessionId*/, -2 /*ioId not relevant here, using random value*/,
             &pDbp->mDownmixHandle/*pHandle*/) != 0) {
         ALOGE("prepareTrackForDownmix(%d) fails: error creating downmixer effect", trackName);
         goto noDownmixForActiveTrack;
@@ -412,7 +417,7 @@ void AudioMixer::setParameter(int name, int target, int param, void *value)
     case TRACK:
         switch (param) {
         case CHANNEL_MASK: {
-            uint32_t mask = (uint32_t)value;
+            audio_channel_mask_t mask = (audio_channel_mask_t) value;
             if (track.channelMask != mask) {
                 uint32_t channelCount = popcount(mask);
                 ALOG_ASSERT((channelCount <= MAX_NUM_CHANNELS_TO_DOWNMIX) && channelCount);
@@ -534,11 +539,23 @@ bool AudioMixer::track_t::setResampler(uint32_t value, uint32_t devSampleRate)
         if (sampleRate != value) {
             sampleRate = value;
             if (resampler == NULL) {
+                ALOGV("creating resampler from track %d Hz to device %d Hz", value, devSampleRate);
+                AudioResampler::src_quality quality;
+                // force lowest quality level resampler if use case isn't music or video
+                // FIXME this is flawed for dynamic sample rates, as we choose the resampler
+                // quality level based on the initial ratio, but that could change later.
+                // Should have a way to distinguish tracks with static ratios vs. dynamic ratios.
+                if (!((value == 44100 && devSampleRate == 48000) ||
+                      (value == 48000 && devSampleRate == 44100))) {
+                    quality = AudioResampler::LOW_QUALITY;
+                } else {
+                    quality = AudioResampler::DEFAULT_QUALITY;
+                }
                 resampler = AudioResampler::create(
                         format,
                         // the resampler sees the number of channels after the downmixer, if any
                         downmixerBufferProvider != NULL ? MAX_NUM_CHANNELS : channelCount,
-                        devSampleRate);
+                        devSampleRate, quality);
                 resampler->setLocalTimeFreq(localTimeFreq);
             }
             return true;

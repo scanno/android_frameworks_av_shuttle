@@ -110,6 +110,12 @@ status_t NuMediaExtractor::setDataSource(
         // give us data in a call to MediaSource::read(), unlike its
         // default mode that we use from AwesomePlayer.
         static_cast<WVMExtractor *>(mImpl.get())->setCryptoPluginMode(true);
+    } else if (mImpl->getDrmFlag()) {
+        // For all other drm content, we don't want to expose decrypted
+        // content to Java application.
+        mImpl.clear();
+        mImpl = NULL;
+        return ERROR_UNSUPPORTED;
     }
 
     mDataSource = dataSource;
@@ -120,6 +126,7 @@ status_t NuMediaExtractor::setDataSource(
 }
 
 status_t NuMediaExtractor::setDataSource(int fd, off64_t offset, off64_t size) {
+
     Mutex::Autolock autoLock(mLock);
 
     if (mImpl != NULL) {
@@ -140,6 +147,31 @@ status_t NuMediaExtractor::setDataSource(int fd, off64_t offset, off64_t size) {
     }
 
     mDataSource = fileSource;
+
+    updateDurationAndBitrate();
+
+    return OK;
+}
+
+status_t NuMediaExtractor::setDataSource(const sp<DataSource> &source) {
+    Mutex::Autolock autoLock(mLock);
+
+    if (mImpl != NULL) {
+        return -EINVAL;
+    }
+
+    status_t err = source->initCheck();
+    if (err != OK) {
+        return err;
+    }
+
+    mImpl = MediaExtractor::Create(source);
+
+    if (mImpl == NULL) {
+        return ERROR_UNSUPPORTED;
+    }
+
+    mDataSource = source;
 
     updateDurationAndBitrate();
 

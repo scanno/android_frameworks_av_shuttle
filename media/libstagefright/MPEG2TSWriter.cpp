@@ -28,6 +28,7 @@
 #include <media/stagefright/MediaSource.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/Utils.h>
+#include <arpa/inet.h>
 
 #include "include/ESDS.h"
 
@@ -418,6 +419,8 @@ void MPEG2TSWriter::SourceInfo::onMessageReceived(const sp<AMessage> &msg) {
                     } else {
                         postAVCFrame(buffer);
                     }
+                } else {
+                    readMore();
                 }
 
                 buffer->release();
@@ -471,7 +474,9 @@ MPEG2TSWriter::MPEG2TSWriter(int fd)
       mStarted(false),
       mNumSourcesDone(0),
       mNumTSPacketsWritten(0),
-      mNumTSPacketsBeforeMeta(0) {
+      mNumTSPacketsBeforeMeta(0),
+      mPATContinuityCounter(0),
+      mPMTContinuityCounter(0) {
     init();
 }
 
@@ -482,7 +487,9 @@ MPEG2TSWriter::MPEG2TSWriter(const char *filename)
       mStarted(false),
       mNumSourcesDone(0),
       mNumTSPacketsWritten(0),
-      mNumTSPacketsBeforeMeta(0) {
+      mNumTSPacketsBeforeMeta(0),
+      mPATContinuityCounter(0),
+      mPMTContinuityCounter(0) {
     init();
 }
 
@@ -495,12 +502,16 @@ MPEG2TSWriter::MPEG2TSWriter(
       mStarted(false),
       mNumSourcesDone(0),
       mNumTSPacketsWritten(0),
-      mNumTSPacketsBeforeMeta(0) {
+      mNumTSPacketsBeforeMeta(0),
+      mPATContinuityCounter(0),
+      mPMTContinuityCounter(0) {
     init();
 }
 
 void MPEG2TSWriter::init() {
     CHECK(mFile != NULL || mWriteFunc != NULL);
+
+    initCrcTable();
 
     mLooper = new ALooper;
     mLooper->setName("MPEG2TSWriter");
@@ -729,11 +740,16 @@ void MPEG2TSWriter::writeProgramAssociationTable() {
     };
 
     sp<ABuffer> buffer = new ABuffer(188);
-    memset(buffer->data(), 0, buffer->size());
+    memset(buffer->data(), 0xff, buffer->size());
     memcpy(buffer->data(), kData, sizeof(kData));
 
-    static const unsigned kContinuityCounter = 5;
-    buffer->data()[3] |= kContinuityCounter;
+    if (++mPATContinuityCounter == 16) {
+        mPATContinuityCounter = 0;
+    }
+    buffer->data()[3] |= mPATContinuityCounter;
+
+    uint32_t crc = htonl(crc32(&buffer->data()[5], 12));
+    memcpy(&buffer->data()[17], &crc, sizeof(crc));
 
     CHECK_EQ(internalWrite(buffer->data(), buffer->size()), buffer->size());
 }
@@ -781,11 +797,13 @@ void MPEG2TSWriter::writeProgramMap() {
     };
 
     sp<ABuffer> buffer = new ABuffer(188);
-    memset(buffer->data(), 0, buffer->size());
+    memset(buffer->data(), 0xff, buffer->size());
     memcpy(buffer->data(), kData, sizeof(kData));
 
-    static const unsigned kContinuityCounter = 5;
-    buffer->data()[3] |= kContinuityCounter;
+    if (++mPMTContinuityCounter == 16) {
+        mPMTContinuityCounter = 0;
+    }
+    buffer->data()[3] |= mPMTContinuityCounter;
 
     size_t section_length = 5 * mSources.size() + 4 + 9;
     buffer->data()[6] |= section_length >> 8;
@@ -806,10 +824,8 @@ void MPEG2TSWriter::writeProgramMap() {
         *ptr++ = 0x00;
     }
 
-    *ptr++ = 0x00;
-    *ptr++ = 0x00;
-    *ptr++ = 0x00;
-    *ptr++ = 0x00;
+    uint32_t crc = htonl(crc32(&buffer->data()[5], 12+mSources.size()*5));
+    memcpy(&buffer->data()[17+mSources.size()*5], &crc, sizeof(crc));
 
     CHECK_EQ(internalWrite(buffer->data(), buffer->size()), buffer->size());
 }
@@ -822,7 +838,7 @@ void MPEG2TSWriter::writeAccessUnit(
     // transport_priority = b0
     // PID = b0 0001 1110 ???? (13 bits) [0x1e0 + 1 + sourceIndex]
     // transport_scrambling_control = b00
-    // adaptation_field_control = b01 (no adaptation field, payload only)
+    // adaptation_field_control = b??
     // continuity_counter = b????
     // -- payload follows
     // packet_startcode_prefix = 0x000001
@@ -852,7 +868,7 @@ void MPEG2TSWriter::writeAccessUnit(
     // the first fragment of "buffer" follows
 
     sp<ABuffer> buffer = new ABuffer(188);
-    memset(buffer->data(), 0, buffer->size());
+    memset(buffer->data(), 0xff, buffer->size());
 
     const unsigned PID = 0x1e0 + sourceIndex + 1;
 
@@ -870,6 +886,7 @@ void MPEG2TSWriter::writeAccessUnit(
     uint32_t PTS = (timeUs * 9ll) / 100ll;
 
     size_t PES_packet_length = accessUnit->size() + 8;
+    bool padding = (accessUnit->size() < (188 - 18));
 
     if (PES_packet_length >= 65536) {
         // This really should only happen for video.
@@ -883,7 +900,15 @@ void MPEG2TSWriter::writeAccessUnit(
     *ptr++ = 0x47;
     *ptr++ = 0x40 | (PID >> 8);
     *ptr++ = PID & 0xff;
-    *ptr++ = 0x10 | continuity_counter;
+    *ptr++ = (padding ? 0x30 : 0x10) | continuity_counter;
+    if (padding) {
+        int paddingSize = 188 - accessUnit->size() - 18;
+        *ptr++ = paddingSize - 1;
+        if (paddingSize >= 2) {
+            *ptr++ = 0x00;
+            ptr += paddingSize - 2;
+        }
+    }
     *ptr++ = 0x00;
     *ptr++ = 0x00;
     *ptr++ = 0x01;
@@ -911,6 +936,7 @@ void MPEG2TSWriter::writeAccessUnit(
 
     size_t offset = copy;
     while (offset < accessUnit->size()) {
+        bool lastAccessUnit = ((accessUnit->size() - offset) < 184);
         // for subsequent fragments of "buffer":
         // 0x47
         // transport_error_indicator = b0
@@ -918,11 +944,11 @@ void MPEG2TSWriter::writeAccessUnit(
         // transport_priority = b0
         // PID = b0 0001 1110 ???? (13 bits) [0x1e0 + 1 + sourceIndex]
         // transport_scrambling_control = b00
-        // adaptation_field_control = b01 (no adaptation field, payload only)
+        // adaptation_field_control = b??
         // continuity_counter = b????
         // the fragment of "buffer" follows.
 
-        memset(buffer->data(), 0, buffer->size());
+        memset(buffer->data(), 0xff, buffer->size());
 
         const unsigned continuity_counter =
             mSources.editItemAt(sourceIndex)->incrementContinuityCounter();
@@ -931,7 +957,18 @@ void MPEG2TSWriter::writeAccessUnit(
         *ptr++ = 0x47;
         *ptr++ = 0x00 | (PID >> 8);
         *ptr++ = PID & 0xff;
-        *ptr++ = 0x10 | continuity_counter;
+        *ptr++ = (lastAccessUnit ? 0x30 : 0x10) | continuity_counter;
+
+        if (lastAccessUnit) {
+            // Pad packet using an adaptation field
+            // Adaptation header all to 0 execpt size
+            uint8_t paddingSize = (uint8_t)184 - (accessUnit->size() - offset);
+            *ptr++ = paddingSize - 1;
+            if (paddingSize >= 2) {
+                *ptr++ = 0x00;
+                ptr += paddingSize - 2;
+            }
+        }
 
         size_t sizeLeft = buffer->data() + buffer->size() - ptr;
         size_t copy = accessUnit->size() - offset;
@@ -954,6 +991,33 @@ void MPEG2TSWriter::writeTS() {
 
         mNumTSPacketsBeforeMeta = mNumTSPacketsWritten + 2500;
     }
+}
+
+void MPEG2TSWriter::initCrcTable() {
+    uint32_t poly = 0x04C11DB7;
+
+    for (int i = 0; i < 256; i++) {
+        uint32_t crc = i << 24;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc << 1) ^ ((crc & 0x80000000) ? (poly) : 0);
+        }
+        mCrcTable[i] = crc;
+    }
+}
+
+/**
+ * Compute CRC32 checksum for buffer starting at offset start and for length
+ * bytes.
+ */
+uint32_t MPEG2TSWriter::crc32(const uint8_t *p_start, size_t length) {
+    uint32_t crc = 0xFFFFFFFF;
+    const uint8_t *p;
+
+    for (p = p_start; p < p_start + length; p++) {
+        crc = (crc << 8) ^ mCrcTable[((crc >> 24) ^ *p) & 0xFF];
+    }
+
+    return crc;
 }
 
 ssize_t MPEG2TSWriter::internalWrite(const void *data, size_t size) {

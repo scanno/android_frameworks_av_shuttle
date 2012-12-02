@@ -40,6 +40,7 @@ public:
 
     void start();
     void pause();
+    void resume();
     void seekToAsync(int64_t timeUs);
     void setDataSource(sp<TimedTextSource> source);
 
@@ -49,6 +50,8 @@ protected:
 private:
     enum {
         kWhatPause = 'paus',
+        kWhatResume = 'resm',
+        kWhatStart = 'strt',
         kWhatSeek = 'seek',
         kWhatRetryRead = 'read',
         kWhatSendSubtitle = 'send',
@@ -62,13 +65,15 @@ private:
 
     wp<MediaPlayerBase> mListener;
     sp<TimedTextSource> mSource;
+    int64_t mPendingSeekTimeUs;
+    bool mPaused;
     int32_t mSendSubtitleGeneration;
 
     void doSeekAndRead(int64_t seekTimeUs);
     void doRead(MediaSource::ReadOptions* options = NULL);
     void onTextEvent();
     void postTextEvent(const sp<ParcelEvent>& parcel = NULL, int64_t timeUs = -1);
-    void postTextEventDelayUs(const sp<ParcelEvent>& parcel = NULL, int64_t delayUs = -1);
+    int64_t delayUsFromCurrentTime(int64_t fireTimeUs);
     void notifyError(int error = 0);
     void notifyListener(const Parcel *parcel = NULL);
 

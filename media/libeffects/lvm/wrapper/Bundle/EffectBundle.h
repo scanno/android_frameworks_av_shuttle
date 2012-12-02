@@ -95,6 +95,8 @@ struct BundledEffectContext{
     int                             SamplesToExitCountVirt;
     LVM_INT16                       *workBuffer;
     int                             frameCount;
+    int32_t                         bandGaindB[FIVEBAND_NUMBANDS];
+    int                             volume;
     #ifdef LVM_PCM
     FILE                            *PcmInPtr;
     FILE                            *PcmOutPtr;

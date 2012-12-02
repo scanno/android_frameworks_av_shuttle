@@ -147,12 +147,13 @@ static bool IsSoftwareCodec(const char *componentName) {
 // A sort order in which OMX software codecs are first, followed
 // by other (non-OMX) software codecs, followed by everything else.
 static int CompareSoftwareCodecsFirst(
-        const String8 *elem1, const String8 *elem2) {
-    bool isOMX1 = !strncmp(elem1->string(), "OMX.", 4);
-    bool isOMX2 = !strncmp(elem2->string(), "OMX.", 4);
+        const OMXCodec::CodecNameAndQuirks *elem1,
+        const OMXCodec::CodecNameAndQuirks *elem2) {
+    bool isOMX1 = !strncmp(elem1->mName.string(), "OMX.", 4);
+    bool isOMX2 = !strncmp(elem2->mName.string(), "OMX.", 4);
 
-    bool isSoftwareCodec1 = IsSoftwareCodec(elem1->string());
-    bool isSoftwareCodec2 = IsSoftwareCodec(elem2->string());
+    bool isSoftwareCodec1 = IsSoftwareCodec(elem1->mName.string());
+    bool isSoftwareCodec2 = IsSoftwareCodec(elem2->mName.string());
 
     if (isSoftwareCodec1) {
         if (!isSoftwareCodec2) { return -1; }
@@ -182,13 +183,8 @@ void OMXCodec::findMatchingCodecs(
         const char *mime,
         bool createEncoder, const char *matchComponentName,
         uint32_t flags,
-        Vector<String8> *matchingCodecs,
-        Vector<uint32_t> *matchingCodecQuirks) {
+        Vector<CodecNameAndQuirks> *matchingCodecs) {
     matchingCodecs->clear();
-
-    if (matchingCodecQuirks) {
-        matchingCodecQuirks->clear();
-    }
 
     const MediaCodecList *list = MediaCodecList::getInstance();
     if (list == NULL) {
@@ -221,11 +217,13 @@ void OMXCodec::findMatchingCodecs(
             ((flags & kHardwareCodecsOnly) &&  !IsSoftwareCodec(componentName)) ||
             (!(flags & (kSoftwareCodecsOnly | kHardwareCodecsOnly)))) {
 
-            matchingCodecs->push(String8(componentName));
+            ssize_t index = matchingCodecs->add();
+            CodecNameAndQuirks *entry = &matchingCodecs->editItemAt(index);
+            entry->mName = String8(componentName);
+            entry->mQuirks = getComponentQuirks(list, matchIndex);
 
-            if (matchingCodecQuirks) {
-                matchingCodecQuirks->push(getComponentQuirks(list, matchIndex));
-            }
+            ALOGV("matching '%s' quirks 0x%08x",
+                  entry->mName.string(), entry->mQuirks);
         }
     }
 
@@ -294,13 +292,14 @@ sp<MediaSource> OMXCodec::Create(
     bool success = meta->findCString(kKeyMIMEType, &mime);
     CHECK(success);
 
-    Vector<String8> matchingCodecs;
-    Vector<uint32_t> matchingCodecQuirks;
+    Vector<CodecNameAndQuirks> matchingCodecs;
     findMatchingCodecs(
-            mime, createEncoder, matchComponentName, flags,
-            &matchingCodecs, &matchingCodecQuirks);
+            mime, createEncoder, matchComponentName, flags, &matchingCodecs);
 
     if (matchingCodecs.isEmpty()) {
+        ALOGV("No matching codecs! (mime: %s, createEncoder: %s, "
+                "matchComponentName: %s, flags: 0x%x)",
+                mime, createEncoder ? "true" : "false", matchComponentName, flags);
         return NULL;
     }
 
@@ -308,8 +307,8 @@ sp<MediaSource> OMXCodec::Create(
     IOMX::node_id node = 0;
 
     for (size_t i = 0; i < matchingCodecs.size(); ++i) {
-        const char *componentNameBase = matchingCodecs[i].string();
-        uint32_t quirks = matchingCodecQuirks[i];
+        const char *componentNameBase = matchingCodecs[i].mName.string();
+        uint32_t quirks = matchingCodecs[i].mQuirks;
         const char *componentName = componentNameBase;
 
         AString tmp;
@@ -547,12 +546,8 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
         if (mIsEncoder) {
             setVideoInputFormat(mMIME, meta);
         } else {
-            int32_t width, height;
-            bool success = meta->findInt32(kKeyWidth, &width);
-            success = success && meta->findInt32(kKeyHeight, &height);
-            CHECK(success);
             status_t err = setVideoOutputFormat(
-                    mMIME, width, height);
+                    mMIME, meta);
 
             if (err != OK) {
                 return err;
@@ -569,6 +564,8 @@ status_t OMXCodec::configureCodec(const sp<MetaData> &meta) {
 
     if ((mFlags & kClientNeedsFramebuffer)
             && !strncmp(mComponentName, "OMX.SEC.", 8)) {
+        // This appears to no longer be needed???
+
         OMX_INDEXTYPE index;
 
         status_t err =
@@ -893,7 +890,7 @@ static OMX_U32 setPFramesSpacing(int32_t iFramesInterval, int32_t frameRate) {
     } else if (iFramesInterval == 0) {
         return 0;
     }
-    OMX_U32 ret = frameRate * iFramesInterval;
+    OMX_U32 ret = frameRate * iFramesInterval - 1;
     CHECK(ret > 1);
     return ret;
 }
@@ -1171,7 +1168,13 @@ status_t OMXCodec::setupAVCEncoderParameters(const sp<MetaData>& meta) {
 }
 
 status_t OMXCodec::setVideoOutputFormat(
-        const char *mime, OMX_U32 width, OMX_U32 height) {
+        const char *mime, const sp<MetaData>& meta) {
+
+    int32_t width, height;
+    bool success = meta->findInt32(kKeyWidth, &width);
+    success = success && meta->findInt32(kKeyHeight, &height);
+    CHECK(success);
+
     CODEC_LOGV("setVideoOutputFormat width=%ld, height=%ld", width, height);
 
     OMX_VIDEO_CODINGTYPE compressionFormat = OMX_VIDEO_CodingUnused;
@@ -1214,7 +1217,28 @@ status_t OMXCodec::setVideoOutputFormat(
                || format.eColorFormat == OMX_COLOR_FormatYUV420SemiPlanar
                || format.eColorFormat == OMX_COLOR_FormatCbYCrY
                || format.eColorFormat == OMX_TI_COLOR_FormatYUV420PackedSemiPlanar
-               || format.eColorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar);
+               || format.eColorFormat == OMX_QCOM_COLOR_FormatYVU420SemiPlanar
+               || format.eColorFormat == OMX_QCOM_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka);
+
+        int32_t colorFormat;
+        if (meta->findInt32(kKeyColorFormat, &colorFormat)
+                && colorFormat != OMX_COLOR_FormatUnused
+                && colorFormat != format.eColorFormat) {
+
+            while (OMX_ErrorNoMore != err) {
+                format.nIndex++;
+                err = mOMX->getParameter(
+                        mNode, OMX_IndexParamVideoPortFormat,
+                            &format, sizeof(format));
+                if (format.eColorFormat == colorFormat) {
+                    break;
+                }
+            }
+            if (format.eColorFormat != colorFormat) {
+                CODEC_LOGE("Color format %d is not supported", colorFormat);
+                return ERROR_UNSUPPORTED;
+            }
+        }
 
         err = mOMX->setParameter(
                 mNode, OMX_IndexParamVideoPortFormat,
@@ -1665,6 +1689,8 @@ status_t OMXCodec::applyRotation() {
     if (transform) {
         err = native_window_set_buffers_transform(
                 mNativeWindow.get(), transform);
+        ALOGE("native_window_set_buffers_transform failed: %s (%d)",
+                strerror(-err), -err);
     }
 
     return err;
@@ -1679,6 +1705,7 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     status_t err = mOMX->getParameter(
             mNode, OMX_IndexParamPortDefinition, &def, sizeof(def));
     if (err != OK) {
+        CODEC_LOGE("getParameter failed: %d", err);
         return err;
     }
 
@@ -1776,7 +1803,7 @@ status_t OMXCodec::allocateOutputBuffersFromNativeWindow() {
     // Dequeue buffers and send them to OMX
     for (OMX_U32 i = 0; i < def.nBufferCountActual; i++) {
         ANativeWindowBuffer* buf;
-        err = mNativeWindow->dequeueBuffer(mNativeWindow.get(), &buf);
+        err = native_window_dequeue_buffer_and_wait(mNativeWindow.get(), &buf);
         if (err != 0) {
             ALOGE("dequeueBuffer failed: %s (%d)", strerror(-err), -err);
             break;
@@ -1832,7 +1859,7 @@ status_t OMXCodec::cancelBufferToNativeWindow(BufferInfo *info) {
     CHECK_EQ((int)info->mStatus, (int)OWNED_BY_US);
     CODEC_LOGV("Calling cancelBuffer on buffer %p", info->mBuffer);
     int err = mNativeWindow->cancelBuffer(
-        mNativeWindow.get(), info->mMediaBuffer->graphicBuffer().get());
+        mNativeWindow.get(), info->mMediaBuffer->graphicBuffer().get(), -1);
     if (err != 0) {
       CODEC_LOGE("cancelBuffer failed w/ error 0x%08x", err);
 
@@ -1846,7 +1873,8 @@ status_t OMXCodec::cancelBufferToNativeWindow(BufferInfo *info) {
 OMXCodec::BufferInfo* OMXCodec::dequeueBufferFromNativeWindow() {
     // Dequeue the next buffer from the native window.
     ANativeWindowBuffer* buf;
-    int err = mNativeWindow->dequeueBuffer(mNativeWindow.get(), &buf);
+    int fenceFd = -1;
+    int err = native_window_dequeue_buffer_and_wait(mNativeWindow.get(), &buf);
     if (err != 0) {
       CODEC_LOGE("dequeueBuffer failed w/ error 0x%08x", err);
 
@@ -1950,7 +1978,8 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
     // on the screen and then been replaced, so an previous video frames are
     // guaranteed NOT to be currently displayed.
     for (int i = 0; i < numBufs + 1; i++) {
-        err = mNativeWindow->dequeueBuffer(mNativeWindow.get(), &anb);
+        int fenceFd = -1;
+        err = native_window_dequeue_buffer_and_wait(mNativeWindow.get(), &anb);
         if (err != NO_ERROR) {
             ALOGE("error pushing blank frames: dequeueBuffer failed: %s (%d)",
                     strerror(-err), -err);
@@ -1958,13 +1987,6 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
         }
 
         sp<GraphicBuffer> buf(new GraphicBuffer(anb, false));
-        err = mNativeWindow->lockBuffer(mNativeWindow.get(),
-                buf->getNativeBuffer());
-        if (err != NO_ERROR) {
-            ALOGE("error pushing blank frames: lockBuffer failed: %s (%d)",
-                    strerror(-err), -err);
-            goto error;
-        }
 
         // Fill the buffer with the a 1x1 checkerboard pattern ;)
         uint32_t* img = NULL;
@@ -1985,7 +2007,7 @@ status_t OMXCodec::pushBlankBuffersToNativeWindow() {
         }
 
         err = mNativeWindow->queueBuffer(mNativeWindow.get(),
-                buf->getNativeBuffer());
+                buf->getNativeBuffer(), -1);
         if (err != NO_ERROR) {
             ALOGE("error pushing blank frames: queueBuffer failed: %s (%d)",
                     strerror(-err), -err);
@@ -2000,7 +2022,7 @@ error:
     if (err != NO_ERROR) {
         // Clean up after an error.
         if (anb != NULL) {
-            mNativeWindow->cancelBuffer(mNativeWindow.get(), anb);
+            mNativeWindow->cancelBuffer(mNativeWindow.get(), anb, -1);
         }
 
         native_window_api_disconnect(mNativeWindow.get(),
@@ -2049,8 +2071,14 @@ int64_t OMXCodec::getDecodingTimeUs() {
 
 void OMXCodec::on_message(const omx_message &msg) {
     if (mState == ERROR) {
-        ALOGW("Dropping OMX message - we're in ERROR state.");
-        return;
+        /*
+         * only drop EVENT messages, EBD and FBD are still
+         * processed for bookkeeping purposes
+         */
+        if (msg.type == omx_message::EVENT) {
+            ALOGW("Dropping OMX EVENT message - we're in ERROR state.");
+            return;
+        }
     }
 
     switch (msg.type) {
@@ -2086,13 +2114,6 @@ void OMXCodec::on_message(const omx_message &msg) {
 
             // Buffer could not be released until empty buffer done is called.
             if (info->mMediaBuffer != NULL) {
-                if (mIsEncoder &&
-                    (mQuirks & kAvoidMemcopyInputRecordingFrames)) {
-                    // If zero-copy mode is enabled this will send the
-                    // input buffer back to the upstream source.
-                    restorePatchedDataPointer(info);
-                }
-
                 info->mMediaBuffer->release();
                 info->mMediaBuffer = NULL;
             }
@@ -3065,39 +3086,24 @@ bool OMXCodec::drainInputBuffer(BufferInfo *info) {
         }
 
         bool releaseBuffer = true;
-        if (mIsEncoder && (mQuirks & kAvoidMemcopyInputRecordingFrames)) {
-            CHECK(mOMXLivesLocally && offset == 0);
-
-            OMX_BUFFERHEADERTYPE *header =
-                (OMX_BUFFERHEADERTYPE *)info->mBuffer;
-
-            CHECK(header->pBuffer == info->mData);
-
-            header->pBuffer =
-                (OMX_U8 *)srcBuffer->data() + srcBuffer->range_offset();
-
-            releaseBuffer = false;
-            info->mMediaBuffer = srcBuffer;
-        } else {
-            if (mFlags & kStoreMetaDataInVideoBuffers) {
+        if (mFlags & kStoreMetaDataInVideoBuffers) {
                 releaseBuffer = false;
                 info->mMediaBuffer = srcBuffer;
-            }
+        }
 
-            if (mFlags & kUseSecureInputBuffers) {
+        if (mFlags & kUseSecureInputBuffers) {
                 // Data in "info" is already provided at this time.
 
                 releaseBuffer = false;
 
                 CHECK(info->mMediaBuffer == NULL);
                 info->mMediaBuffer = srcBuffer;
-            } else {
-                CHECK(srcBuffer->data() != NULL) ;
-                memcpy((uint8_t *)info->mData + offset,
-                        (const uint8_t *)srcBuffer->data()
-                            + srcBuffer->range_offset(),
-                        srcBuffer->range_length());
-            }
+        } else {
+            CHECK(srcBuffer->data() != NULL) ;
+            memcpy((uint8_t *)info->mData + offset,
+                    (const uint8_t *)srcBuffer->data()
+                        + srcBuffer->range_offset(),
+                    srcBuffer->range_length());
         }
 
         int64_t lastBufferTimeUs;
@@ -3197,23 +3203,6 @@ void OMXCodec::fillOutputBuffer(BufferInfo *info) {
         CODEC_LOGV("There is no more output data available, not "
              "calling fillOutputBuffer");
         return;
-    }
-
-    if (info->mMediaBuffer != NULL) {
-        sp<GraphicBuffer> graphicBuffer = info->mMediaBuffer->graphicBuffer();
-        if (graphicBuffer != 0) {
-            // When using a native buffer we need to lock the buffer before
-            // giving it to OMX.
-            CODEC_LOGV("Calling lockBuffer on %p", info->mBuffer);
-            int err = mNativeWindow->lockBuffer(mNativeWindow.get(),
-                    graphicBuffer.get());
-            if (err != 0) {
-                CODEC_LOGE("lockBuffer failed w/ error 0x%08x", err);
-
-                setState(ERROR);
-                return;
-            }
-        }
     }
 
     CODEC_LOGV("Calling fillBuffer on buffer %p", info->mBuffer);
@@ -3620,6 +3609,7 @@ status_t OMXCodec::start(MetaData *meta) {
     Mutex::Autolock autoLock(mLock);
 
     if (mState != LOADED) {
+        CODEC_LOGE("called start in the unexpected state: %d", mState);
         return UNKNOWN_ERROR;
     }
 
@@ -3635,11 +3625,6 @@ status_t OMXCodec::start(MetaData *meta) {
         }
         params->setInt64(kKeyTime, startTimeUs);
     }
-    status_t err = mSource->start(params.get());
-
-    if (err != OK) {
-        return err;
-    }
 
     mCodecSpecificDataIndex = 0;
     mInitialBufferSubmit = true;
@@ -3652,13 +3637,45 @@ status_t OMXCodec::start(MetaData *meta) {
     mFilledBuffers.clear();
     mPaused = false;
 
+    status_t err;
+    if (mIsEncoder) {
+        // Calling init() before starting its source so that we can configure,
+        // if supported, the source to use exactly the same number of input
+        // buffers as requested by the encoder.
+        if ((err = init()) != OK) {
+            CODEC_LOGE("init failed: %d", err);
+            return err;
+        }
+
+        params->setInt32(kKeyNumBuffers, mPortBuffers[kPortIndexInput].size());
+        err = mSource->start(params.get());
+        if (err != OK) {
+            CODEC_LOGE("source failed to start: %d", err);
+            stopOmxComponent_l();
+        }
+        return err;
+    }
+
+    // Decoder case
+    if ((err = mSource->start(params.get())) != OK) {
+        CODEC_LOGE("source failed to start: %d", err);
+        return err;
+    }
     return init();
 }
 
 status_t OMXCodec::stop() {
     CODEC_LOGV("stop mState=%d", mState);
-
     Mutex::Autolock autoLock(mLock);
+    status_t err = stopOmxComponent_l();
+    mSource->stop();
+
+    CODEC_LOGV("stopped in state %d", mState);
+    return err;
+}
+
+status_t OMXCodec::stopOmxComponent_l() {
+    CODEC_LOGV("stopOmxComponent_l mState=%d", mState);
 
     while (isIntermediateState(mState)) {
         mAsyncCompletion.wait(mLock);
@@ -3755,10 +3772,6 @@ status_t OMXCodec::stop() {
         mLeftOverBuffer->release();
         mLeftOverBuffer = NULL;
     }
-
-    mSource->stop();
-
-    CODEC_LOGV("stopped in state %d", mState);
 
     return OK;
 }
@@ -4511,7 +4524,7 @@ status_t QueryCodecs(
         const sp<IOMX> &omx,
         const char *mime, bool queryDecoders, bool hwCodecOnly,
         Vector<CodecCapabilities> *results) {
-    Vector<String8> matchingCodecs;
+    Vector<OMXCodec::CodecNameAndQuirks> matchingCodecs;
     results->clear();
 
     OMXCodec::findMatchingCodecs(mime,
@@ -4521,7 +4534,7 @@ status_t QueryCodecs(
             &matchingCodecs);
 
     for (size_t c = 0; c < matchingCodecs.size(); c++) {
-        const char *componentName = matchingCodecs.itemAt(c).string();
+        const char *componentName = matchingCodecs.itemAt(c).mName.string();
 
         results->push();
         CodecCapabilities *caps = &results->editItemAt(results->size() - 1);
@@ -4606,14 +4619,6 @@ status_t QueryCodecs(
         const char *mimeType, bool queryDecoders,
         Vector<CodecCapabilities> *results) {
     return QueryCodecs(omx, mimeType, queryDecoders, false /*hwCodecOnly*/, results);
-}
-
-void OMXCodec::restorePatchedDataPointer(BufferInfo *info) {
-    CHECK(mIsEncoder && (mQuirks & kAvoidMemcopyInputRecordingFrames));
-    CHECK(mOMXLivesLocally);
-
-    OMX_BUFFERHEADERTYPE *header = (OMX_BUFFERHEADERTYPE *)info->mBuffer;
-    header->pBuffer = (OMX_U8 *)info->mData;
 }
 
 // These are supposed be equivalent to the logic in

@@ -25,11 +25,17 @@
 
 namespace android {
 
+
+typedef const int32_t * (*readCoefficientsFn)(bool upDownSample);
+typedef int32_t (*readResampleFirNumCoeffFn)();
+typedef int32_t (*readResampleFirLerpIntBitsFn)();
+
 // ----------------------------------------------------------------------------
 
 class AudioResamplerSinc : public AudioResampler {
 public:
-    AudioResamplerSinc(int bitDepth, int inChannelCount, int32_t sampleRate);
+    AudioResamplerSinc(int bitDepth, int inChannelCount, int32_t sampleRate,
+            src_quality quality = HIGH_QUALITY);
 
     virtual ~AudioResamplerSinc();
 
@@ -67,19 +73,24 @@ private:
     static const int32_t RESAMPLE_FIR_NUM_COEF       = 8;
     static const int32_t RESAMPLE_FIR_LERP_INT_BITS  = 4;
 
-    // we have 16 coefs samples per zero-crossing
-    static const int coefsBits = RESAMPLE_FIR_LERP_INT_BITS;        // 4
-    static const int cShift = kNumPhaseBits - coefsBits;            // 26
-    static const uint32_t cMask  = ((1<<coefsBits)-1) << cShift;    // 0xf<<26 = 3c00 0000
+    struct Constants {
+        // we have 16 coefs samples per zero-crossing
+        int coefsBits;
+        int cShift;
+        uint32_t cMask;
 
-    // and we use 15 bits to interpolate between these samples
-    // this cannot change because the mul below rely on it.
-    static const int pLerpBits = 15;
-    static const int pShift = kNumPhaseBits - coefsBits - pLerpBits;    // 11
-    static const uint32_t pMask  = ((1<<pLerpBits)-1) << pShift;    // 0x7fff << 11
+        int pShift;
+        uint32_t pMask;
 
-    // number of zero-crossing on each side
-    static const unsigned int halfNumCoefs = RESAMPLE_FIR_NUM_COEF;
+        // number of zero-crossing on each side
+        unsigned int halfNumCoefs;
+    };
+
+    static Constants highQualityConstants;
+    static Constants veryHighQualityConstants;
+    const Constants *mConstants;    // points to appropriate set of coefficient parameters
+
+    static void init_routine();
 };
 
 // ----------------------------------------------------------------------------

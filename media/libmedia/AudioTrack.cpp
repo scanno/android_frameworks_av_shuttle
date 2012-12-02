@@ -54,6 +54,11 @@ status_t AudioTrack::getMinFrameCount(
         audio_stream_type_t streamType,
         uint32_t sampleRate)
 {
+    if (frameCount == NULL) return BAD_VALUE;
+
+    // default to 0 in case of error
+    *frameCount = 0;
+
     // FIXME merge with similar code in createTrack_l(), except we're missing
     //       some information here that is available in createTrack_l():
     //          audio_io_handle_t output
@@ -98,7 +103,7 @@ AudioTrack::AudioTrack(
         audio_stream_type_t streamType,
         uint32_t sampleRate,
         audio_format_t format,
-        int channelMask,
+        audio_channel_mask_t channelMask,
         int frameCount,
         audio_output_flags_t flags,
         callback_t cbf,
@@ -131,7 +136,8 @@ AudioTrack::AudioTrack(
       mIsTimed(false),
       mPreviousPriority(ANDROID_PRIORITY_NORMAL), mPreviousSchedulingGroup(SP_DEFAULT)
 {
-    mStatus = set((audio_stream_type_t)streamType, sampleRate, (audio_format_t)format, channelMask,
+    mStatus = set((audio_stream_type_t)streamType, sampleRate, (audio_format_t)format,
+            (audio_channel_mask_t) channelMask,
             frameCount, (audio_output_flags_t)flags, cbf, user, notificationFrames,
             0 /*sharedBuffer*/, false /*threadCanCallJava*/, sessionId);
 }
@@ -140,7 +146,7 @@ AudioTrack::AudioTrack(
         audio_stream_type_t streamType,
         uint32_t sampleRate,
         audio_format_t format,
-        int channelMask,
+        audio_channel_mask_t channelMask,
         const sp<IMemory>& sharedBuffer,
         audio_output_flags_t flags,
         callback_t cbf,
@@ -181,7 +187,7 @@ status_t AudioTrack::set(
         audio_stream_type_t streamType,
         uint32_t sampleRate,
         audio_format_t format,
-        int channelMask,
+        audio_channel_mask_t channelMask,
         int frameCount,
         audio_output_flags_t flags,
         callback_t cbf,
@@ -247,7 +253,7 @@ status_t AudioTrack::set(
     }
 
     if (!audio_is_output_channel(channelMask)) {
-        ALOGE("Invalid channel mask");
+        ALOGE("Invalid channel mask %#x", channelMask);
         return BAD_VALUE;
     }
     uint32_t channelCount = popcount(channelMask);
@@ -281,7 +287,7 @@ status_t AudioTrack::set(
     status_t status = createTrack_l(streamType,
                                   sampleRate,
                                   format,
-                                  (uint32_t)channelMask,
+                                  channelMask,
                                   frameCount,
                                   flags,
                                   sharedBuffer,
@@ -299,7 +305,7 @@ status_t AudioTrack::set(
 
     mStreamType = streamType;
     mFormat = format;
-    mChannelMask = (uint32_t)channelMask;
+    mChannelMask = channelMask;
     mChannelCount = channelCount;
     mSharedBuffer = sharedBuffer;
     mMuted = false;
@@ -367,7 +373,6 @@ sp<IMemory>& AudioTrack::sharedBuffer()
 void AudioTrack::start()
 {
     sp<AudioTrackThread> t = mAudioTrackThread;
-    status_t status = NO_ERROR;
 
     ALOGV("start %p", this);
 
@@ -395,6 +400,7 @@ void AudioTrack::start()
         }
 
         ALOGV("start %p before lock cblk %p", this, mCblk);
+        status_t status = NO_ERROR;
         if (!(cblk->flags & CBLK_INVALID_MSK)) {
             cblk->lock.unlock();
             ALOGV("mAudioTrack->start()");
@@ -727,6 +733,14 @@ int AudioTrack::getSessionId() const
     return mSessionId;
 }
 
+// ## Compatibility enum to be able to use ICS propietary libs with JB - As soon as JB
+//  propietary libs are released, this declaration can go away... 			
+int AudioTrack::getSessionId()
+{
+    return mSessionId;
+}
+// ##
+
 status_t AudioTrack::attachAuxEffect(int effectId)
 {
     ALOGV("attachAuxEffect(%d)", effectId);
@@ -744,7 +758,7 @@ status_t AudioTrack::createTrack_l(
         audio_stream_type_t streamType,
         uint32_t sampleRate,
         audio_format_t format,
-        uint32_t channelMask,
+        audio_channel_mask_t channelMask,
         int frameCount,
         audio_output_flags_t flags,
         const sp<IMemory>& sharedBuffer,
@@ -1138,7 +1152,7 @@ status_t TimedAudioTrack::allocateTimedBuffer(size_t size, sp<IMemory>* buffer)
 
     // If the track is not invalid already, try to allocate a buffer.  alloc
     // fails indicating that the server is dead, flag the track as invalid so
-    // we can attempt to restore in in just a bit.
+    // we can attempt to restore in just a bit.
     if (!(mCblk->flags & CBLK_INVALID_MSK)) {
         result = mAudioTrack->allocateTimedBuffer(size, buffer);
         if (result == DEAD_OBJECT) {
@@ -1470,15 +1484,6 @@ bool AudioTrack::AudioTrackThread::threadLoop()
         pause();
     }
     return true;
-}
-
-status_t AudioTrack::AudioTrackThread::readyToRun()
-{
-    return NO_ERROR;
-}
-
-void AudioTrack::AudioTrackThread::onFirstRef()
-{
 }
 
 void AudioTrack::AudioTrackThread::requestExit()

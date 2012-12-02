@@ -52,6 +52,8 @@ class GraphicBuffer;
 // may be dropped.  It is possible to wait for the buffers to be
 // returned (but not implemented)
 
+#define DEBUG_PENDING_BUFFERS   0
+
 class SurfaceMediaSource : public MediaSource,
                                 public MediaBufferObserver,
                                 protected BufferQueue::ConsumerListener {
@@ -73,10 +75,9 @@ public:
 
     // For the MediaSource interface for use by StageFrightRecorder:
     virtual status_t start(MetaData *params = NULL);
-
-    virtual status_t stop() { return reset(); }
-    virtual status_t read(
-            MediaBuffer **buffer, const ReadOptions *options = NULL);
+    virtual status_t stop();
+    virtual status_t read(MediaBuffer **buffer,
+            const ReadOptions *options = NULL);
     virtual sp<MetaData> getFormat();
 
     // Get / Set the frame rate used for encoding. Default fps = 30
@@ -111,6 +112,12 @@ public:
     bool isMetaDataStoredInVideoBuffers() const;
 
     sp<BufferQueue> getBufferQueue() const { return mBufferQueue; }
+
+    // To be called before start()
+    status_t setMaxAcquiredBufferCount(size_t count);
+
+    // To be called before start()
+    status_t setUseAbsoluteTimestamps();
 
 protected:
 
@@ -165,6 +172,12 @@ private:
     // this list in signalBufferReturned
     Vector<sp<GraphicBuffer> > mCurrentBuffers;
 
+    size_t mNumPendingBuffers;
+
+#if DEBUG_PENDING_BUFFERS
+    Vector<MediaBuffer *> mPendingBuffers;
+#endif
+
     // mCurrentTimestamp is the timestamp for the current texture. It
     // gets set to mLastQueuedTimestamp each time updateTexImage is called.
     int64_t mCurrentTimestamp;
@@ -183,8 +196,8 @@ private:
     // Set to a default of 30 fps if not specified by the client side
     int32_t mFrameRate;
 
-    // mStopped is a flag to check if the recording is going on
-    bool mStopped;
+    // mStarted is a flag to check if the recording is going on
+    bool mStarted;
 
     // mNumFramesReceived indicates the number of frames recieved from
     // the client side
@@ -200,11 +213,15 @@ private:
     // offset timestamps.
     int64_t mStartTimeNs;
 
+    size_t mMaxAcquiredBufferCount;
+
+    bool mUseAbsoluteTimestamps;
+
     // mFrameAvailableCondition condition used to indicate whether there
     // is a frame available for dequeuing
     Condition mFrameAvailableCondition;
 
-    status_t reset();
+    Condition mMediaBuffersAvailableCondition;
 
     // Avoid copying and equating and default constructor
     DISALLOW_IMPLICIT_CONSTRUCTORS(SurfaceMediaSource);

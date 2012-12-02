@@ -28,9 +28,11 @@
 #include "RTSPSource.h"
 #include "StreamingSource.h"
 #include "GenericSource.h"
+#include "mp4/MP4Source.h"
 
 #include "ATSParser.h"
 
+#include <cutils/properties.h> // for property_get
 #include <media/stagefright/foundation/hexdump.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
@@ -42,6 +44,9 @@
 #include <gui/ISurfaceTexture.h>
 
 #include "avc_utils.h"
+
+#include "ESDS.h"
+#include <media/stagefright/Utils.h>
 
 namespace android {
 
@@ -63,7 +68,8 @@ NuPlayer::NuPlayer()
       mSkipRenderingVideoUntilMediaTimeUs(-1ll),
       mVideoLateByUs(0ll),
       mNumFramesTotal(0ll),
-      mNumFramesDropped(0ll) {
+      mNumFramesDropped(0ll),
+      mVideoScalingMode(NATIVE_WINDOW_SCALING_MODE_SCALE_TO_WINDOW) {
 }
 
 NuPlayer::~NuPlayer() {
@@ -81,7 +87,14 @@ void NuPlayer::setDriver(const wp<NuPlayerDriver> &driver) {
 void NuPlayer::setDataSource(const sp<IStreamSource> &source) {
     sp<AMessage> msg = new AMessage(kWhatSetDataSource, id());
 
-    msg->setObject("source", new StreamingSource(source));
+    char prop[PROPERTY_VALUE_MAX];
+    if (property_get("media.stagefright.use-mp4source", prop, NULL)
+            && (!strcmp(prop, "1") || !strcasecmp(prop, "true"))) {
+        msg->setObject("source", new MP4Source(source));
+    } else {
+        msg->setObject("source", new StreamingSource(source));
+    }
+
     msg->post();
 }
 
@@ -205,6 +218,9 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
             CHECK(msg->findObject("native-window", &obj));
 
             mNativeWindow = static_cast<NativeWindowWrapper *>(obj.get());
+
+            // XXX - ignore error from setVideoScalingMode for now
+            setVideoScalingMode(mVideoScalingMode);
             break;
         }
 
@@ -258,7 +274,9 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
             ALOGV("scanning sources haveAudio=%d, haveVideo=%d",
                  mAudioDecoder != NULL, mVideoDecoder != NULL);
 
-            instantiateDecoder(false, &mVideoDecoder);
+            if (mNativeWindow != NULL) {
+                instantiateDecoder(false, &mVideoDecoder);
+            }
 
             if (mAudioSink != NULL) {
                 instantiateDecoder(true, &mAudioDecoder);
@@ -279,7 +297,8 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
                 break;
             }
 
-            if (mAudioDecoder == NULL || mVideoDecoder == NULL) {
+            if ((mAudioDecoder == NULL && mAudioSink != NULL)
+                    || (mVideoDecoder == NULL && mNativeWindow != NULL)) {
                 msg->post(100000ll);
                 mScanSourcesPending = true;
             }
@@ -500,6 +519,8 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
                 CHECK(msg->findInt32("audio", &audio));
 
                 ALOGV("renderer %s flush completed.", audio ? "audio" : "video");
+            } else if (what == Renderer::kWhatVideoRenderingStart) {
+                notifyListener(MEDIA_INFO, MEDIA_INFO_RENDERING_START, 0);
             }
             break;
         }
@@ -674,16 +695,16 @@ status_t NuPlayer::instantiateDecoder(bool audio, sp<Decoder> *decoder) {
         return OK;
     }
 
-    sp<MetaData> meta = mSource->getFormat(audio);
+    sp<AMessage> format = mSource->getFormat(audio);
 
-    if (meta == NULL) {
+    if (format == NULL) {
         return -EWOULDBLOCK;
     }
 
     if (!audio) {
-        const char *mime;
-        CHECK(meta->findCString(kKeyMIMEType, &mime));
-        mVideoIsAVC = !strcasecmp(MEDIA_MIMETYPE_VIDEO_AVC, mime);
+        AString mime;
+        CHECK(format->findString("mime", &mime));
+        mVideoIsAVC = !strcasecmp(MEDIA_MIMETYPE_VIDEO_AVC, mime.c_str());
     }
 
     sp<AMessage> notify =
@@ -694,7 +715,7 @@ status_t NuPlayer::instantiateDecoder(bool audio, sp<Decoder> *decoder) {
                        new Decoder(notify, mNativeWindow);
     looper()->registerHandler(*decoder);
 
-    (*decoder)->configure(meta);
+    (*decoder)->configure(format);
 
     int64_t durationUs;
     if (mDriver != NULL && mSource->getDuration(&durationUs) == OK) {
@@ -923,6 +944,36 @@ void NuPlayer::flushDecoder(bool audio, bool needShutdown) {
                 : FLUSHED;
         }
     }
+}
+
+sp<AMessage> NuPlayer::Source::getFormat(bool audio) {
+    sp<MetaData> meta = getFormatMeta(audio);
+
+    if (meta == NULL) {
+        return NULL;
+    }
+
+    sp<AMessage> msg = new AMessage;
+
+    if(convertMetaDataToMessage(meta, &msg) == OK) {
+        return msg;
+    }
+    return NULL;
+}
+
+status_t NuPlayer::setVideoScalingMode(int32_t mode) {
+    mVideoScalingMode = mode;
+    if (mNativeWindow != NULL
+            && mNativeWindow->getNativeWindow() != NULL) {
+        status_t ret = native_window_set_scaling_mode(
+                mNativeWindow->getNativeWindow().get(), mVideoScalingMode);
+        if (ret != OK) {
+            ALOGE("Failed to set scaling mode (%d): %s",
+                -ret, strerror(-ret));
+            return ret;
+        }
+    }
+    return OK;
 }
 
 }  // namespace android
